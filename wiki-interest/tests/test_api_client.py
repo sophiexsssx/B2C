@@ -83,6 +83,34 @@ def test_build_session_sets_user_agent_with_contact(monkeypatch):
     assert "https://example.org/wiki-interest; sofia@example.org" in session.headers["User-Agent"]
 
 
+def test_bare_session_gets_compliant_user_agent_enforced(requests_mock, session, monkeypatch):
+    # `session` here is a plain requests.Session() (see the fixture below),
+    # never passed through build_session() -- and requests.Session() already
+    # carries its own default User-Agent ("python-requests/x.y.z"), which is
+    # exactly the non-descriptive default Wikimedia may block. The shared
+    # request boundary must overwrite it regardless of who built the session.
+    monkeypatch.setenv("WIKITREND_CONTACT", "https://example.org/wiki-interest; sofia@example.org")
+    assert "python-requests" in session.headers["User-Agent"]  # sanity: confirms the default is really there
+
+    url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(url, json={"query": {"pages": {"1": {"title": "Python", "langlinks": []}}}})
+
+    get_langlinks(session, "en.wikipedia", "Python")
+
+    sent_ua = requests_mock.last_request.headers["User-Agent"]
+    assert "python-requests" not in sent_ua
+    assert "https://example.org/wiki-interest; sofia@example.org" in sent_ua
+
+
+def test_bare_session_without_contact_raises_even_without_build_session(requests_mock, session, monkeypatch):
+    # Confirms the enforcement doesn't depend on the caller having gone
+    # through build_session() at all -- any entry point must raise.
+    monkeypatch.delenv("WIKITREND_CONTACT", raising=False)
+    with pytest.raises(ContactNotConfiguredError):
+        get_langlinks(session, "en.wikipedia", "Python")
+    assert requests_mock.call_count == 0  # must fail before ever making the request
+
+
 # ---------------------------------------------------------------------------
 # 2. get_pageviews_per_article / get_pageviews_aggregate
 # ---------------------------------------------------------------------------

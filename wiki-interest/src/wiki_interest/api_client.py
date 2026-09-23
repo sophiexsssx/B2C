@@ -67,15 +67,20 @@ class _NotFoundResponse(Exception):
     """Internal: signals a 404 up to the caller that knows how to interpret it."""
 
 
-def build_session() -> requests.Session:
+def _compliant_user_agent() -> str:
     """
-    Build a requests.Session with a contact-bearing User-Agent set once.
+    Build the required Wikimedia User-Agent from WIKITREND_CONTACT, raising
+    ContactNotConfiguredError if it's unset.
 
     Wikimedia has required a descriptive User-Agent with contact info on
     every request since Feb 2010; non-descriptive/absent ones "may be
-    blocked without notice" regardless of status code (notes/api.md Q6).
-    The contact string comes from WIKITREND_CONTACT (a URL and/or email);
-    we fail loudly rather than silently sending a bare default UA.
+    blocked without notice" regardless of status code (notes/api.md Q6) --
+    and a bare `requests.Session()` already carries its own default
+    ("python-requests/x.y.z"), which is exactly the kind of non-descriptive
+    default value that warning is about, so this can't be a "set only if
+    missing" check. Shared by build_session() and _get_json() so the header
+    is enforced at the one place every request actually goes through, not
+    just for callers who remembered to use build_session().
     """
     contact = os.environ.get("WIKITREND_CONTACT")
     if not contact:
@@ -84,8 +89,13 @@ def build_session() -> requests.Session:
             "User-Agent with contact info on every request -- set e.g. "
             "WIKITREND_CONTACT='https://example.org/wiki-interest; you@example.org'"
         )
+    return f"WikiInterestBot/1.0 ({contact})"
+
+
+def build_session() -> requests.Session:
+    """Build a requests.Session with the required contact-bearing User-Agent set."""
     session = requests.Session()
-    session.headers["User-Agent"] = f"WikiInterestBot/1.0 ({contact})"
+    session.headers["User-Agent"] = _compliant_user_agent()
     return session
 
 
@@ -301,7 +311,14 @@ def _get_json(session: requests.Session, url: str, params: dict = None) -> dict:
     exponential backoff (honoring Retry-After when present). Raises
     _NotFoundResponse on 404 so callers can decide what that means; raises
     for any other non-2xx status via response.raise_for_status().
+
+    Sets the required contact-bearing User-Agent on `session` before making
+    any request -- every public function funnels through here for every HTTP
+    call, so this is the one place that enforcement can't be bypassed by a
+    caller who passed in their own plain requests.Session() instead of one
+    from build_session().
     """
+    session.headers["User-Agent"] = _compliant_user_agent()
     last_error = None
     for attempt in range(MAX_RETRIES):
         response = session.get(url, params=params, timeout=15)
