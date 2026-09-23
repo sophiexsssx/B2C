@@ -24,6 +24,7 @@ from wiki_interest.api_client import (
     get_pageviews_aggregate,
     get_pageviews_per_article,
     get_redirects,
+    get_wikidata_qid,
     get_wikidata_sitelinks,
     resolve_cross_language,
 )
@@ -498,6 +499,60 @@ def test_get_langlinks_happy_path(requests_mock, session):
         "fr": "Python (langage)",
         "pl": "Python (język programowania)",
     }
+
+
+def test_get_langlinks_requests_redirect_resolution_and_follows_it(requests_mock, session):
+    # A redirect page has no langlinks of its own (they belong to the
+    # target) -- verified against the live API that querying one without
+    # redirects=1 returns an empty stub with no "langlinks" key at all.
+    # This asserts both that the outgoing request asks for redirect
+    # resolution, and that the response shape MediaWiki returns when it
+    # actually follows one (a top-level "redirects" list, and the target's
+    # data under the target's own pageid, not the requested title's) is
+    # parsed correctly.
+    url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        url,
+        json={
+            "query": {
+                "redirects": [{"from": "Astronomical", "to": "Astronomy"}],
+                "pages": {
+                    "50650": {
+                        "title": "Astronomy",
+                        "langlinks": [{"lang": "de", "*": "Astronomie"}],
+                    }
+                },
+            }
+        },
+    )
+
+    result = get_langlinks(session, "en.wikipedia", "Astronomical")
+
+    assert result == {"de": "Astronomie"}
+    assert requests_mock.last_request.qs.get("redirects") == ["1"]
+
+
+def test_get_wikidata_qid_requests_redirect_resolution_and_follows_it(requests_mock, session):
+    url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        url,
+        json={
+            "query": {
+                "redirects": [{"from": "Astronomical", "to": "Astronomy"}],
+                "pages": {
+                    "50650": {
+                        "title": "Astronomy",
+                        "pageprops": {"wikibase_item": "Q333"},
+                    }
+                },
+            }
+        },
+    )
+
+    result = get_wikidata_qid(session, "en.wikipedia", "Astronomical")
+
+    assert result == "Q333"
+    assert requests_mock.last_request.qs.get("redirects") == ["1"]
 
 
 def test_get_wikidata_sitelinks_happy_path(requests_mock, session):

@@ -167,9 +167,17 @@ def get_langlinks(session, project, title, limit=500):
     Single API call, no normalization needed -- verified to match Wikidata
     sitelinks once site-key naming is normalized, for the one article tested
     (notes/api.md Q3). Returns {lang_code: title}.
+
+    redirects=1 makes this follow `title` if it's itself a redirect --
+    verified this matters a lot: querying a known redirect (e.g.
+    "Astronomical" -> "Astronomy") without it returns a bare page stub with
+    no langlinks key at all (the redirect page itself has none; they belong
+    to the target), while with it the API resolves to the target and
+    returns its real langlinks. A non-redirect title's response is
+    identical either way (verified), so this is safe to always pass.
     """
     url = _mediawiki_api_url(project)
-    params = {"action": "query", "titles": title, "prop": "langlinks", "lllimit": limit, "format": "json"}
+    params = {"action": "query", "titles": title, "prop": "langlinks", "lllimit": limit, "redirects": 1, "format": "json"}
     data = _get_json(session, url, params=params)
     result = {}
     for page in data.get("query", {}).get("pages", {}).values():
@@ -232,9 +240,15 @@ def _mediawiki_api_url(project: str) -> str:
 
 
 def get_wikidata_qid(session, project, title):
-    """Resolve the Wikidata item id (QID) for `title` on `project`, or None if it has none."""
+    """
+    Resolve the Wikidata item id (QID) for `title` on `project`, or None if
+    it has none. redirects=1 follows `title` if it's itself a redirect --
+    same reasoning as get_langlinks: a redirect page has no pageprops of
+    its own (the QID belongs to the target), so without this a redirect
+    title would wrongly resolve to "no Wikidata item found".
+    """
     url = _mediawiki_api_url(project)
-    params = {"action": "query", "titles": title, "prop": "pageprops", "ppprop": "wikibase_item", "format": "json"}
+    params = {"action": "query", "titles": title, "prop": "pageprops", "ppprop": "wikibase_item", "redirects": 1, "format": "json"}
     data = _get_json(session, url, params=params)
     for page in data.get("query", {}).get("pages", {}).values():
         qid = page.get("pageprops", {}).get("wikibase_item")

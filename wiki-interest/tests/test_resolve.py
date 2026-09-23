@@ -102,6 +102,30 @@ def test_happy_path_all_langs_covered_and_agreeing(requests_mock, session):
     }
 
 
+def test_requests_to_source_project_ask_for_redirect_resolution(requests_mock, session):
+    # If the `title` passed to resolve_topic is itself a redirect (e.g. a
+    # user's natural phrasing lands on a redirect rather than the canonical
+    # title), langlinks/pageprops queries without redirects=1 silently
+    # return empty results for the redirect page itself -- verified against
+    # the live API. Both requests resolve_topic sends to the source
+    # project (langlinks, then pageprops) must ask for redirect resolution.
+    project_url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(project_url, json=_project_responder({"de": "Astronomie"}, "Q333"))
+    requests_mock.get(WIKIDATA_API, json=_sitelinks_json("Q333", {"de": "Astronomie"}))
+    _register_redirects(requests_mock, "de", "Astronomie", [])
+
+    resolve_topic(session, "en.wikipedia", "Astronomical", ["de"])
+
+    # resolve_topic calls get_wikidata_qid directly, then get_wikidata_sitelinks
+    # (which redundantly calls get_wikidata_qid again internally) -- a
+    # pre-existing minor inefficiency, unrelated to this test's purpose.
+    # So: 1 langlinks request + 2 pageprops requests = 3 total.
+    source_project_requests = [r for r in requests_mock.request_history if r.url.startswith(project_url)]
+    assert len(source_project_requests) == 3
+    for request in source_project_requests:
+        assert request.qs.get("redirects") == ["1"]
+
+
 # ---------------------------------------------------------------------------
 # 2. Language covered by neither source
 # ---------------------------------------------------------------------------
