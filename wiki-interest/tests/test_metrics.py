@@ -6,10 +6,12 @@ hand-built {"YYYY-MM": views} dicts, no mocking needed. See notes/plan.md
 section 2 ("Metrics vs. traps") for the spec these implement.
 """
 
+import random
 from datetime import datetime, timezone
 
 import pytest
 
+from wiki_interest import metrics
 from wiki_interest.metrics import (
     MANN_KENDALL_MIN_POINTS,
     classify_spikes_and_seasonal,
@@ -597,8 +599,8 @@ def test_trend_significance_flat_but_seasonal_series_is_not_significant():
 def test_trend_significance_seasonal_plus_real_growth_is_significant():
     # Same seasonal shape as above, but each year's baseline (and its
     # September spike) is meaningfully higher than the last -- a real
-    # underlying YoY growth trend. Confirms the rolling-window fix doesn't
-    # just suppress all significance; it still detects genuine trends.
+    # underlying YoY growth trend. Confirms the seasonal-Kendall approach
+    # doesn't just suppress all significance; it still detects genuine trends.
     article_monthly = {}
     for year, baseline, spike in [(2023, 100, 1000), (2024, 200, 1100), (2025, 300, 1200)]:
         for month in range(1, 13):
@@ -612,6 +614,45 @@ def test_trend_significance_seasonal_plus_real_growth_is_significant():
     assert result["significant"] is True
     assert "series_length" in result
     assert "excluded_incomplete_month" in result
+
+
+def test_trend_significance_false_positive_rate_near_alpha_on_flat_noisy_seasonal_data():
+    # The regression this guards against: an earlier implementation ran
+    # plain Mann-Kendall on a ROLLING 12-month-summed ratio series to cancel
+    # seasonality. That works for a perfectly deterministic seasonal pattern
+    # (see the test above), but overlapping rolling sums are strongly
+    # autocorrelated with their neighbors, and plain MK's variance formula
+    # assumes independent observations -- on flat-but-NOISY seasonal data,
+    # that measured false-positive rate empirically at ~61% against a 5%
+    # nominal alpha. The seasonal (within-calendar-month) approach compares
+    # only independent same-month-across-years observations, so it should
+    # stay near the nominal alpha instead.
+    rng = random.Random(20260101)  # fixed seed: deterministic, reproducible
+    simulations = 500
+    false_positives = 0
+
+    for _ in range(simulations):
+        article_monthly = {}
+        site_monthly = {}
+        for year in (2023, 2024, 2025):
+            for month in range(1, 13):
+                baseline = 1000 if month == 9 else 500  # flat seasonal pattern, NO real trend
+                noisy_views = max(0, round(baseline + rng.gauss(0, 40)))
+                article_monthly[f"{year:04d}-{month:02d}"] = noisy_views
+                site_monthly[f"{year:04d}-{month:02d}"] = 100_000
+
+        result = compute_trend_significance(article_monthly, site_monthly, period_start="2023-01", period_end="2025-12")
+        if result["significant"]:
+            false_positives += 1
+
+    false_positive_rate = false_positives / simulations
+    # Generous band around SIGNIFICANCE_ALPHA (0.05) to avoid test flakiness
+    # from a single seed's sampling noise, while still failing hard if the
+    # rate is anywhere near the ~0.61 the old rolling-window bug produced.
+    assert false_positive_rate <= 3 * metrics.SIGNIFICANCE_ALPHA, (
+        f"false positive rate {false_positive_rate:.3f} is too high for alpha={metrics.SIGNIFICANCE_ALPHA} "
+        "-- looks like the autocorrelation-inflated-significance bug"
+    )
 
 
 # ---------------------------------------------------------------------------

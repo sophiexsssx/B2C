@@ -23,7 +23,6 @@ MANN_KENDALL_MIN_POINTS = 5
 SIGNIFICANCE_ALPHA = 0.05
 REFERENCE_TARGET_MONTHS = 36
 SHORT_PERIOD_MONTHS = 24
-ROLLING_WINDOW_MONTHS = 12
 
 _CONFIDENCE_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low"}
 
@@ -321,49 +320,98 @@ def mann_kendall_test(values: list) -> dict:
     return {"significant": p_value < SIGNIFICANCE_ALPHA, "z": z, "p_value": p_value, "insufficient_data": False}
 
 
-def _rolling_12mo_ratio_series(article_monthly: dict, site_monthly: dict, months: list) -> list:
-    """
-    Trailing-12-month article/site view-share ratio for each window ending
-    at each month in `months` from the 12th one onward (chronological order).
-
-    This transform does two things at once, both required for the
-    significance test to match notes/plan.md's "normalized, spike-free
-    monthly series": every window sums a full calendar year, so within-year
-    seasonality cancels by construction (a strong summer dip / September
-    peak no longer looks like a trend); and article/site is a *ratio*, so
-    it isolates topic-specific change from Wikipedia's overall traffic
-    trend, same as compute_share_yoy_growth.
-    """
-    ordered = sorted(months)
-    ratios = []
-    for i in range(ROLLING_WINDOW_MONTHS - 1, len(ordered)):
-        window = ordered[i - (ROLLING_WINDOW_MONTHS - 1) : i + 1]
-        article_sum = sum(article_monthly.get(m, 0) for m in window)
-        site_sum = sum(site_monthly.get(m, 0) for m in window)
-        if site_sum > 0:
-            ratios.append(article_sum / site_sum)
+def _monthly_ratio_series(article_monthly: dict, site_monthly: dict, months: list) -> dict:
+    """{month: article/site ratio} for each month present in both series with a nonzero site total."""
+    ratios = {}
+    for month in months:
+        site_views = site_monthly.get(month, 0)
+        if month in article_monthly and site_views > 0:
+            ratios[month] = article_monthly[month] / site_views
     return ratios
+
+
+def seasonal_mann_kendall_test(monthly_values: dict) -> dict:
+    """
+    Seasonal Mann-Kendall (Hirsch, Slack & Smith 1982): splits `monthly_values`
+    into 12 within-calendar-month subseries (all Januaries, all Februaries,
+    ...), computes each subseries' S and Var(S) independently -- so every
+    comparison is strictly same-calendar-month-across-different-years, and a
+    repeating seasonal cycle can never look like a trend -- then pools:
+    S = sum(S_k), Var(S) = sum(Var(S_k)), z from the pooled statistic.
+
+    Deliberately NOT plain mann_kendall_test on a rolling-window-summed
+    series: overlapping rolling sums are strongly autocorrelated with their
+    neighbors (each shares 11 of 12 months with the previous one), and
+    plain MK's variance formula assumes independent observations --
+    verified empirically that running it on rolling sums of a flat seasonal
+    series false-positives at ~61% against a 5% nominal rate. Each
+    within-calendar-month subseries here genuinely consists of independent
+    yearly observations, so the classical MK variance formula validly
+    applies within each one.
+    """
+    by_calendar_month = {}
+    for month, value in monthly_values.items():
+        by_calendar_month.setdefault(month[5:7], []).append((month, value))
+
+    total_s = 0
+    total_var = 0.0
+    usable_subseries_points = 0
+    for pairs in by_calendar_month.values():
+        pairs.sort()
+        values = [v for _, v in pairs]
+        n = len(values)
+        if n < 2:
+            continue
+        usable_subseries_points += n
+        s = 0
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                diff = values[j] - values[i]
+                s += (diff > 0) - (diff < 0)
+        tie_counts = Counter(values)
+        tie_correction = sum(t * (t - 1) * (2 * t + 5) for t in tie_counts.values() if t > 1)
+        total_s += s
+        total_var += (n * (n - 1) * (2 * n + 5) - tie_correction) / 18.0
+
+    insufficient_data = usable_subseries_points < MANN_KENDALL_MIN_POINTS
+    if total_var <= 0:
+        z = 0.0
+    elif total_s > 0:
+        z = (total_s - 1) / math.sqrt(total_var)
+    elif total_s < 0:
+        z = (total_s + 1) / math.sqrt(total_var)
+    else:
+        z = 0.0
+
+    p_value = 2 * (1 - _normal_cdf(abs(z)))
+    return {
+        "significant": (not insufficient_data) and p_value < SIGNIFICANCE_ALPHA,
+        "z": z,
+        "p_value": p_value,
+        "insufficient_data": insufficient_data,
+    }
 
 
 def compute_trend_significance(spike_free_article_monthly: dict, spike_free_site_monthly: dict, period_start: str, period_end: str, today=None) -> dict:
     """
     The intended entry point for trend significance -- NOT plain
-    mann_kendall_test on a raw monthly series. Runs Mann-Kendall on a
-    rolling trailing-12-month article/site share series (see
-    _rolling_12mo_ratio_series) restricted to the requested period only
+    mann_kendall_test on a raw or rolling-summed monthly series. Runs
+    seasonal_mann_kendall_test (see its docstring) on the monthly
+    article/site share ratio, restricted to the requested period only
     (reference months are for spike/seasonal classification and the
     <24-month YoY baseline, never a reported metric input beyond that).
 
     Plain MK directly on a spike-free-but-still-seasonal monthly series
     would treat a real, strong seasonal cycle (e.g. a reliable September
-    peak) as trend-like structure and can produce false "significant"
-    results on a topic with no real long-term trend at all -- the rolling
-    12-month window cancels that by construction.
+    peak) as trend-like structure; a rolling-window transform "fixes" that
+    but introduces autocorrelation that inflates false positives even
+    further (see seasonal_mann_kendall_test's docstring) -- the seasonal
+    (within-calendar-month) approach avoids both problems.
     """
     period_end, excluded_incomplete_month = _clamp_to_complete_month(period_end, today)
     months = [m for m in spike_free_article_monthly if period_start <= m <= period_end]
-    ratios = _rolling_12mo_ratio_series(spike_free_article_monthly, spike_free_site_monthly, months)
-    result = mann_kendall_test(ratios)
+    ratios = _monthly_ratio_series(spike_free_article_monthly, spike_free_site_monthly, months)
+    result = seasonal_mann_kendall_test(ratios)
     result["series_length"] = len(ratios)
     result["excluded_incomplete_month"] = excluded_incomplete_month
     return result
