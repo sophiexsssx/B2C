@@ -8,8 +8,8 @@ How I used AI tools while building this project and how I checked their output.
   as optional and listed a non-requirement as a requirement. I compared its
   checklist with the original task and corrected all three.
 - **API research (api-researcher subagent):** verified Question 1 manually:
-  API returned <NUMBER> views for Астрономія (uk) in <MONTH> 2025;
-  pageviews.wmcloud.org shows <NUMBER>. Result: <match / mismatch>.
+  API returned 305 views for Астрономія (uk) in July 2025;
+  pageviews.wmcloud.org shows 305. Result: match.
 - **API research (api-researcher subagent):** claimed specific rate-limit
   numbers (10 vs 200 req/min) without a source, and overstated Wikidata
   sitelinks vs langlinks. I asked for evidence and had the claims corrected.

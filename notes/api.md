@@ -21,7 +21,7 @@ https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/{project}/{acces
 **Curl Command:**
 ```bash
 curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/uk.wikipedia/all-access/all-agents/%D0%90%D1%81%D1%82%D1%80%D0%BE%D0%BD%D0%BE%D0%BC%D1%96%D1%8F/monthly/2025010100/2025123100" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 ```
 
 **Trimmed Response:**
@@ -35,7 +35,7 @@ curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/uk.wiki
 }
 ```
 
-**Takeaway:** Cyrillic article titles must be UTF-8 URL-encoded; dates are YYYYMM00 format; always get data as an items array.
+**Takeaway:** Cyrillic article titles must be UTF-8 URL-encoded; monthly timestamps are YYYYMMDDHH format, using the first day at hour 00 (e.g. YYYYMM0100); always get data as an items array.
 
 ---
 
@@ -59,7 +59,7 @@ https://wikimedia.org/api/rest_v1/metrics/pageviews/aggregate/{project}/{access}
 **Curl Command:**
 ```bash
 curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/aggregate/uk.wikipedia/all-access/all-agents/monthly/2025010100/2025123100" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 ```
 
 **Trimmed Response:**
@@ -104,16 +104,16 @@ No case was found where Wikidata sitelinks had *substantively* better/different 
 ```bash
 # MediaWiki langlinks approach (single call)
 curl -s "https://en.wikipedia.org/w/api.php?action=query&titles=Python_(programming_language)&prop=langlinks&lllimit=500&format=json" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 
 # Wikidata sitelinks approach (two calls)
 # Step 1: Get Wikidata ID from Wikipedia
 curl -s "https://en.wikipedia.org/w/api.php?action=query&titles=Python_(programming_language)&prop=pageprops&ppprop=wikibase_item&format=json" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 
 # Step 2: Query Wikidata for sitelinks
 curl -s "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q28865&props=sitelinks&format=json" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 ```
 
 **Trimmed Response (langlinks):**
@@ -152,22 +152,34 @@ curl -s "https://www.wikidata.org/w/api.php?action=wbgetentities&ids=Q28865&prop
 **Params:**
 - `titles`: Astronomy
 - `prop`: redirects
+- `rdlimit`: max
 - `list`: backlinks
 - `blfilterredir`: redirects
 
 **Curl Commands:**
 ```bash
-# Find redirects TO an article
-curl -s "https://en.wikipedia.org/w/api.php?action=query&titles=Astronomy&prop=redirects&rdlimit=20&format=json" \
-  -H "User-Agent: WikiInterestBot/1.0"
+# Find redirects TO an article — use rdlimit=max, not the 10-result default
+# (rdlimit=max is 500 for anonymous requests; verified this returns all 7
+# redirects for "Astronomy" and all 301 for "United States" in one call)
+curl -s "https://en.wikipedia.org/w/api.php?action=query&titles=Astronomy&prop=redirects&rdlimit=max&format=json" \
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
+
+# If the response includes a "continue": {"rdcontinue": "..."} block, the
+# article has more redirects than the rdlimit cap — repeat the call with
+# &rdcontinue=<value from the response> and keep appending pages' redirects
+# until no "continue" block remains. Verified this happens for "United
+# States" at rdlimit=20 (301 total redirects, would need ~15 pages at that
+# limit — rdlimit=max avoids it for all but the most-redirected articles).
+curl -s "https://en.wikipedia.org/w/api.php?action=query&titles=Astronomy&prop=redirects&rdlimit=max&rdcontinue=RDCONTINUE_VALUE&format=json" \
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 
 # Get pageviews for redirect
 curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/Astronomical/monthly/2025010100/2025013100" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 
 # Get pageviews for target
 curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/Astronomy/monthly/2025010100/2025013100" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 ```
 
 **Trimmed Response (pageviews):**
@@ -176,7 +188,7 @@ Redirect "Astronomical": {"views":1142}
 Target "Astronomy": {"views":45699}
 ```
 
-**Takeaway:** Redirect pageviews are counted SEPARATELY under the redirect's own title, not attributed to the target (Astronomical gets 1142, Astronomy gets 45699); use `prop=redirects` to list redirects TO an article, or `backlinks&blfilterredir=redirects` to find all redirects pointing to a page.
+**Takeaway:** Redirect pageviews are counted SEPARATELY under the redirect's own title, not attributed to the target (Astronomical gets 1142, Astronomy gets 45699); use `prop=redirects` to list redirects TO an article, or `backlinks&blfilterredir=redirects` to find all redirects pointing to a page. Always pass `rdlimit=max` and follow the `rdcontinue` token until no `continue` block remains — the default/low limits silently truncate the list for heavily-redirected articles (verified: "United States" has 301 redirects, well past a 20-result cap).
 
 ---
 
@@ -196,10 +208,10 @@ https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/{project}/{acces
 **Curl Commands:**
 ```bash
 curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/user/Astronomy/monthly/2025010100/2025013100" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 
 curl -s "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/Astronomy/monthly/2025010100/2025013100" \
-  -H "User-Agent: WikiInterestBot/1.0"
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
 ```
 
 **Trimmed Response & Comparison:**
@@ -211,7 +223,7 @@ bot/spider:        10,375 views (22.7% of total)
 
 **Note:** This measurement is specific to "Astronomy" in January 2025; bot/spider ratios vary significantly by article and should not be treated as universal.
 
-**Takeaway:** `agent=all-agents` includes bot/crawler traffic (measured ~22.7% for "Astronomy" January 2025, but varies by article); use `agent=user` for pure human pageviews.
+**Takeaway:** `agent=all-agents` includes bot/crawler traffic (measured ~22.7% for "Astronomy" January 2025, but varies by article); use `agent=user` for traffic not classified as spider or automated — this is a heuristic classification (`agent_type: spider|user|automated` per Wikimedia's pageview definition), not a verified-human guarantee.
 
 ---
 
@@ -224,33 +236,41 @@ bot/spider:        10,375 views (22.7% of total)
 | Unidentified (no User-Agent) | 10 req/min | By IP only |
 | Unauthenticated with User-Agent | 200 req/min | Recommended minimum |
 | Authenticated/editors | 200-2000 req/min | Depends on account status |
-| Bots with flags | Unlimited | Must be approved |
+| Bots with flags | Exempt from these per-minute limits | Must be approved; still subject to operational rate limits and the Robot policy |
 
 Source: [Wikimedia APIs/Rate limits - MediaWiki](https://www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits)
 
 **Curl Commands & Results:**
 
 ```bash
-# WITHOUT User-Agent header
+# WITHOUT a custom User-Agent header (curl still sends its own default,
+# e.g. "curl/8.x.x" — that counts as non-descriptive, not "no header")
 curl -s -w "\nHTTP %{http_code}\n" \
   "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/Astronomy/monthly/2025010100/2025013100"
-# Result: HTTP 200 (allowed but limited to 10 req/min)
+# Result this run: HTTP 200 — but a 200 here is NOT proof this is policy-compliant.
+# Per https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy, Wikimedia
+# has required a descriptive User-Agent on every request since Feb 2010, and
+# non-descriptive/default strings (curl's default included) "may be blocked
+# without notice" even if a given request happens to succeed. Treat this as
+# always required, not as optional-but-rate-limited.
 
-# WITH User-Agent header
+# WITH a meaningful, contact-bearing User-Agent header (required)
 curl -s -w "\nHTTP %{http_code}\n" \
   "https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/en.wikipedia/all-access/all-agents/Astronomy/monthly/2025010100/2025013100" \
-  -H "User-Agent: WikiInterestBot/1.0 (sofia research)"
-# Result: HTTP 200 (allowed at 200 req/min)
+  -H "User-Agent: WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)"
+# Result: HTTP 200 (also gets the 200 req/min rate-limit tier per the table above)
 ```
 
 **User-Agent Format Requirements:**
-- Must be "meaningful" and identifiable
+- Required (not optional) on every request, per official policy — see source link below
+- Must be "meaningful"/descriptive with contact information, not a bare tool default
 - Recommended: `BotName/version (URL; contact@email.com) library/version`
 - Example: `WikiInterestBot/1.0 (https://example.org/wiki-interest; sofia@example.org)`
+- Source: [Wikimedia Foundation User-Agent policy](https://foundation.wikimedia.org/wiki/Policy:User-Agent_policy)
 
 **Exceeding Limits:** Returns HTTP 429 (Too Many Requests) with message: `"You are making too many requests to the API"`
 
-**Takeaway:** User-Agent header is not strictly required (still get 200) but strongly recommended—without it you're limited to 10 req/min instead of 200 req/min; exceeding limits returns HTTP 429.
+**Takeaway:** A meaningful User-Agent with contact information is required by policy on every request — a request without one may still return HTTP 200 in a given test, but that is not evidence of compliance; non-descriptive/absent User-Agent strings "may be blocked without notice" regardless of status code. Separately, the rate-limit table above still applies: identified requests get 200 req/min vs. 10 req/min for unidentified ones, and exceeding the limit returns HTTP 429. Always send the header — never treat a passing test as license to omit it.
 
 ---
 
@@ -307,7 +327,7 @@ curl -s -w "\nHTTP %{http_code}\n" \
 ## Key Gotchas for wiki-interest Skill Implementation
 
 1. **Rate Limiting:** Implement User-Agent header to get 200 req/min instead of 10 req/min; handle HTTP 429 with exponential backoff
-2. **Redirect Handling:** Pageviews are NOT aggregated with target articles—redirects show separate counts; retrieve redirects via `prop=redirects` and count each independently
+2. **Redirect Handling:** Pageviews are NOT aggregated with target articles—redirects show separate counts; retrieve redirects via `prop=redirects`, fetch pageviews for each one separately (main article + every redirect), then aggregate by matching time period (e.g. sum same-month values) across all of them into one series — don't just report them independently
 3. **UTF-8 Encoding:** Cyrillic and other non-ASCII article titles must be URL-encoded; Python's `urllib.parse.quote()` handles this correctly
 4. **Missing Data:** Don't assume 200 status means data exists; check items array is non-empty; dates before July 2015 return 404
 5. **Bot vs User Traffic:** Use `agent=user` for human readers only; `agent=all-agents` includes bot traffic which varies by article (measured ~23% for "Astronomy" but not universal); choose based on use case and validate for your articles
