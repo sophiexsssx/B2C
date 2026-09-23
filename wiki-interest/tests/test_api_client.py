@@ -1,0 +1,514 @@
+"""
+Tests for wiki_interest.api_client.
+
+All HTTP calls are mocked via the `requests_mock` pytest fixture (provided
+by the `requests-mock` package) -- no real network calls are made. Env vars
+are set with monkeypatch, never mutated directly.
+"""
+
+import urllib.parse
+
+import pytest
+import requests
+
+from wiki_interest import api_client
+from wiki_interest.api_client import (
+    PAGEVIEWS_BASE,
+    WIKIDATA_API,
+    AmbiguousNoDataError,
+    ContactNotConfiguredError,
+    OutOfRangeError,
+    build_session,
+    get_langlinks,
+    get_pageviews_aggregate,
+    get_pageviews_per_article,
+    get_redirects,
+    get_wikidata_sitelinks,
+    resolve_cross_language,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _mediawiki_url(project: str) -> str:
+    return f"https://{project}.org/w/api.php"
+
+
+def _per_article_url(project, article, start, end, access="all-access", agent="user"):
+    encoded = urllib.parse.quote(article, safe="")
+    return (
+        f"{PAGEVIEWS_BASE}/per-article/{project}/{access}/{agent}/"
+        f"{encoded}/monthly/{start.replace('-', '')}0100/{end.replace('-', '')}0100"
+    )
+
+
+def _aggregate_url(project, start, end, access="all-access", agent="user"):
+    return f"{PAGEVIEWS_BASE}/aggregate/{project}/{access}/{agent}/monthly/{start.replace('-', '')}0100/{end.replace('-', '')}0100"
+
+
+@pytest.fixture
+def session():
+    # build_session() requires WIKITREND_CONTACT; the plain functions under
+    # test just take a requests.Session, so a bare one is fine here.
+    return requests.Session()
+
+
+# ---------------------------------------------------------------------------
+# 1. build_session
+# ---------------------------------------------------------------------------
+
+
+def test_build_session_raises_without_contact(monkeypatch):
+    monkeypatch.delenv("WIKITREND_CONTACT", raising=False)
+    with pytest.raises(ContactNotConfiguredError):
+        build_session()
+
+
+def test_build_session_sets_user_agent_with_contact(monkeypatch):
+    monkeypatch.setenv("WIKITREND_CONTACT", "https://example.org/wiki-interest; sofia@example.org")
+    session = build_session()
+    assert "https://example.org/wiki-interest; sofia@example.org" in session.headers["User-Agent"]
+
+
+# ---------------------------------------------------------------------------
+# 2. get_pageviews_per_article / get_pageviews_aggregate
+# ---------------------------------------------------------------------------
+
+
+def test_per_article_fills_missing_months_with_zero(requests_mock, session):
+    url = _per_article_url("en.wikipedia", "Astronomy", "2024-01", "2024-03")
+    requests_mock.get(
+        url,
+        json={
+            "items": [
+                {"timestamp": "2024010100", "views": 100},
+                {"timestamp": "2024030100", "views": 300},
+            ]
+        },
+    )
+    result = get_pageviews_per_article(session, "en.wikipedia", "Astronomy", "2024-01", "2024-03")
+    assert result == [
+        {"month": "2024-01", "views": 100},
+        {"month": "2024-02", "views": 0},
+        {"month": "2024-03", "views": 300},
+    ]
+
+
+def test_aggregate_fills_missing_months_with_zero(requests_mock, session):
+    url = _aggregate_url("en.wikipedia", "2024-01", "2024-03")
+    requests_mock.get(
+        url,
+        json={
+            "items": [
+                {"timestamp": "2024010100", "views": 1000},
+            ]
+        },
+    )
+    result = get_pageviews_aggregate(session, "en.wikipedia", "2024-01", "2024-03")
+    assert result == [
+        {"month": "2024-01", "views": 1000},
+        {"month": "2024-02", "views": 0},
+        {"month": "2024-03", "views": 0},
+    ]
+
+
+def test_per_article_empty_items_produces_full_zero_series(requests_mock, session):
+    url = _per_article_url("en.wikipedia", "Astronomy", "2024-01", "2024-03")
+    requests_mock.get(url, json={"items": []})
+    result = get_pageviews_per_article(session, "en.wikipedia", "Astronomy", "2024-01", "2024-03")
+    assert result == [
+        {"month": "2024-01", "views": 0},
+        {"month": "2024-02", "views": 0},
+        {"month": "2024-03", "views": 0},
+    ]
+
+
+def test_aggregate_empty_items_produces_full_zero_series(requests_mock, session):
+    url = _aggregate_url("en.wikipedia", "2024-01", "2024-02")
+    requests_mock.get(url, json={"items": []})
+    result = get_pageviews_aggregate(session, "en.wikipedia", "2024-01", "2024-02")
+    assert result == [
+        {"month": "2024-01", "views": 0},
+        {"month": "2024-02", "views": 0},
+    ]
+
+
+def test_per_article_in_range_404_raises_ambiguous_no_data(requests_mock, session):
+    url = _per_article_url("en.wikipedia", "XyzAbcDef12345", "2020-01", "2020-02")
+    requests_mock.get(url, status_code=404, json={"detail": "not found", "status": 404})
+    with pytest.raises(AmbiguousNoDataError):
+        get_pageviews_per_article(session, "en.wikipedia", "XyzAbcDef12345", "2020-01", "2020-02")
+
+
+def test_aggregate_in_range_404_raises_ambiguous_no_data(requests_mock, session):
+    url = _aggregate_url("zz.wikipedia", "2020-01", "2020-02")
+    requests_mock.get(url, status_code=404, json={"detail": "not found", "status": 404})
+    with pytest.raises(AmbiguousNoDataError):
+        get_pageviews_aggregate(session, "zz.wikipedia", "2020-01", "2020-02")
+
+
+def test_per_article_out_of_range_raises_without_http_call(requests_mock, session):
+    with pytest.raises(OutOfRangeError):
+        get_pageviews_per_article(session, "en.wikipedia", "Astronomy", "2015-01", "2015-03")
+    assert requests_mock.request_history == []
+
+
+def test_aggregate_out_of_range_raises_without_http_call(requests_mock, session):
+    with pytest.raises(OutOfRangeError):
+        get_pageviews_aggregate(session, "en.wikipedia", "2010-06", "2010-12")
+    assert requests_mock.request_history == []
+
+
+def test_per_article_encodes_non_ascii_title(requests_mock, session):
+    article = "Астрономія"
+    url = _per_article_url("uk.wikipedia", article, "2024-01", "2024-01")
+    requests_mock.get(url, json={"items": [{"timestamp": "2024010100", "views": 42}]})
+
+    result = get_pageviews_per_article(session, "uk.wikipedia", article, "2024-01", "2024-01")
+
+    assert result == [{"month": "2024-01", "views": 42}]
+    assert len(requests_mock.request_history) == 1
+    encoded_article = urllib.parse.quote(article, safe="")
+    assert encoded_article in requests_mock.request_history[0].url
+    # sanity: the encoded form actually differs from the raw title
+    assert encoded_article != article
+
+
+# ---------------------------------------------------------------------------
+# 3. get_redirects pagination
+# ---------------------------------------------------------------------------
+
+
+def test_get_redirects_follows_rdcontinue_and_combines_pages(requests_mock, session):
+    url = _mediawiki_url("en.wikipedia")
+    first_page = {
+        "query": {
+            "pages": {
+                "736": {
+                    "title": "Astronomy",
+                    "redirects": [
+                        {"title": "Astronomical"},
+                        {"title": "Astronomy (disambiguation)"},
+                    ],
+                }
+            }
+        },
+        "continue": {"rdcontinue": "736|Astro", "continue": "||"},
+    }
+    second_page = {
+        "query": {
+            "pages": {
+                "736": {
+                    "title": "Astronomy",
+                    "redirects": [
+                        {"title": "Astrophysics (redirect)"},
+                    ],
+                }
+            }
+        }
+        # no "continue" key -- pagination ends here
+    }
+    requests_mock.get(url, [{"json": first_page}, {"json": second_page}])
+
+    result = get_redirects(session, "en.wikipedia", "Astronomy")
+
+    assert sorted(result) == sorted(
+        ["Astronomical", "Astronomy (disambiguation)", "Astrophysics (redirect)"]
+    )
+    assert requests_mock.call_count == 2
+    # second request must carry the continuation token from the first response
+    second_request_qs = requests_mock.request_history[1].qs
+    assert second_request_qs.get("rdcontinue") == ["736|astro"] or second_request_qs.get(
+        "rdcontinue"
+    ) == ["736|Astro".lower()]
+
+
+# ---------------------------------------------------------------------------
+# 4. 429 handling (with Retry-After)
+# ---------------------------------------------------------------------------
+
+
+def test_get_json_retries_on_429_then_succeeds(requests_mock, session, monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    url = _mediawiki_url("en.wikipedia")
+    ok_body = {"query": {"pages": {"1": {"title": "Python", "langlinks": [{"lang": "de", "*": "Python"}]}}}}
+    requests_mock.get(
+        url,
+        [
+            {"status_code": 429, "headers": {"Retry-After": "2"}, "json": {"error": "rate limited"}},
+            {"status_code": 200, "json": ok_body},
+        ],
+    )
+
+    result = get_langlinks(session, "en.wikipedia", "Python")
+
+    assert result == {"de": "Python"}
+    assert requests_mock.call_count == 2
+    assert len(sleep_calls) == 1
+    # Retry-After: 2 should be honored (plus up to 0.5s jitter)
+    assert 2.0 <= sleep_calls[0] < 2.5
+
+
+# ---------------------------------------------------------------------------
+# 5. 5xx handling
+# ---------------------------------------------------------------------------
+
+
+def test_get_json_retries_on_503_then_succeeds(requests_mock, session, monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    url = _mediawiki_url("en.wikipedia")
+    ok_body = {"query": {"pages": {"1": {"title": "Python", "langlinks": [{"lang": "fr", "*": "Python"}]}}}}
+    requests_mock.get(
+        url,
+        [
+            {"status_code": 503, "json": {"error": "service unavailable"}},
+            {"status_code": 200, "json": ok_body},
+        ],
+    )
+
+    result = get_langlinks(session, "en.wikipedia", "Python")
+
+    assert result == {"fr": "Python"}
+    assert requests_mock.call_count == 2
+    assert len(sleep_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. Retries exhausted
+# ---------------------------------------------------------------------------
+
+
+def test_get_json_raises_after_retries_exhausted(requests_mock, session, monkeypatch):
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: None)
+
+    url = _mediawiki_url("en.wikipedia")
+    responses = [{"status_code": 503, "json": {"error": "down"}} for _ in range(api_client.MAX_RETRIES)]
+    requests_mock.get(url, responses)
+
+    with pytest.raises(requests.HTTPError):
+        get_langlinks(session, "en.wikipedia", "Python")
+
+    assert requests_mock.call_count == api_client.MAX_RETRIES
+
+
+# ---------------------------------------------------------------------------
+# 7. get_langlinks / get_wikidata_sitelinks happy paths
+# ---------------------------------------------------------------------------
+
+
+def test_get_langlinks_happy_path(requests_mock, session):
+    url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        url,
+        json={
+            "query": {
+                "pages": {
+                    "23033": {
+                        "title": "Python (programming language)",
+                        "langlinks": [
+                            {"lang": "cs", "*": "Python (programovací jazyk)"},
+                            {"lang": "de", "*": "Python (Programmiersprache)"},
+                            {"lang": "fr", "*": "Python (langage)"},
+                            {"lang": "pl", "*": "Python (język programowania)"},
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    result = get_langlinks(session, "en.wikipedia", "Python (programming language)")
+
+    assert result == {
+        "cs": "Python (programovací jazyk)",
+        "de": "Python (Programmiersprache)",
+        "fr": "Python (langage)",
+        "pl": "Python (język programowania)",
+    }
+
+
+def test_get_wikidata_sitelinks_happy_path(requests_mock, session):
+    """
+    Mirrors notes/api.md Q3's two-call shape: resolve the QID via
+    pageprops on the source wiki (_get_wikidata_qid), then fetch sitelinks
+    from Wikidata (wbgetentities). Both calls are mocked with requests-mock.
+    """
+    mediawiki_url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        mediawiki_url,
+        json={
+            "query": {
+                "pages": {
+                    "23033": {
+                        "title": "Python (programming language)",
+                        "pageprops": {"wikibase_item": "Q28865"},
+                    }
+                }
+            }
+        },
+    )
+    requests_mock.get(
+        WIKIDATA_API,
+        json={
+            "entities": {
+                "Q28865": {
+                    "sitelinks": {
+                        "enwiki": {"site": "enwiki", "title": "Python (programming language)"},
+                        "dewiki": {"site": "dewiki", "title": "Python (Programmiersprache)"},
+                        "be_x_oldwiki": {"site": "be_x_oldwiki", "title": "Пайтон"},
+                        "commonswiki": {"site": "commonswiki", "title": "Category:Python"},
+                    }
+                }
+            }
+        },
+    )
+
+    result = get_wikidata_sitelinks(session, "en.wikipedia", "Python (programming language)")
+
+    assert result == {
+        "en": "Python (programming language)",
+        "de": "Python (Programmiersprache)",
+        "be-tarask": "Пайтон",  # site-key alias normalized
+    }
+    assert "commons" not in result  # non-Wikipedia sitelinks excluded
+    assert requests_mock.call_count == 2  # pageprops call + wbgetentities call
+
+
+def test_get_wikidata_sitelinks_no_wikibase_item_skips_second_call(requests_mock, session):
+    """
+    If the page has no pageprops.wikibase_item (not linked to any Wikidata
+    item), get_wikidata_sitelinks must return {} without attempting the
+    wbgetentities call at all.
+    """
+    mediawiki_url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        mediawiki_url,
+        json={
+            "query": {
+                "pages": {
+                    "999": {
+                        "title": "Some Article With No Wikidata Item",
+                        # no "pageprops" key -- page isn't linked to any Wikidata item
+                    }
+                }
+            }
+        },
+    )
+    # Deliberately do NOT register WIKIDATA_API: if get_wikidata_sitelinks
+    # attempted a second call, requests_mock would raise NoMockAddress and
+    # fail this test -- so a passing test proves the second call never happened.
+
+    result = get_wikidata_sitelinks(session, "en.wikipedia", "Some Article With No Wikidata Item")
+
+    assert result == {}
+    assert requests_mock.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. resolve_cross_language
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_cross_language_uses_fallback_only_for_missing_langs(requests_mock, session, monkeypatch):
+    mediawiki_url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        mediawiki_url,
+        json={
+            "query": {
+                "pages": {
+                    "1": {
+                        "title": "Astronomy",
+                        "langlinks": [
+                            {"lang": "de", "*": "Astronomie"},
+                            {"lang": "fr", "*": "Astronomie"},
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    fallback_calls = []
+
+    def fake_sitelinks(sess, project, title):
+        fallback_calls.append((project, title))
+        return {"uk": "Астрономія"}
+
+    monkeypatch.setattr(api_client, "get_wikidata_sitelinks", fake_sitelinks)
+
+    found, missing = resolve_cross_language(session, "en.wikipedia", "Astronomy", ["de", "fr", "uk"])
+
+    assert found == {"de": "Astronomie", "fr": "Astronomie", "uk": "Астрономія"}
+    assert missing == []
+    # fallback should have been consulted (only "uk" was missing after langlinks)
+    assert fallback_calls == [("en.wikipedia", "Astronomy")]
+
+
+def test_resolve_cross_language_skips_fallback_when_langlinks_covers_everything(
+    requests_mock, session, monkeypatch
+):
+    mediawiki_url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        mediawiki_url,
+        json={
+            "query": {
+                "pages": {
+                    "1": {
+                        "title": "Astronomy",
+                        "langlinks": [
+                            {"lang": "de", "*": "Astronomie"},
+                            {"lang": "fr", "*": "Astronomie"},
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    def fail_if_called(sess, project, title):
+        raise AssertionError("fallback should not be called when langlinks covers all target langs")
+
+    monkeypatch.setattr(api_client, "get_wikidata_sitelinks", fail_if_called)
+
+    found, missing = resolve_cross_language(session, "en.wikipedia", "Astronomy", ["de", "fr"])
+
+    assert found == {"de": "Astronomie", "fr": "Astronomie"}
+    assert missing == []
+
+
+def test_resolve_cross_language_reports_missing_when_neither_source_has_it(
+    requests_mock, session, monkeypatch
+):
+    mediawiki_url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(
+        mediawiki_url,
+        json={
+            "query": {
+                "pages": {
+                    "1": {
+                        "title": "Astronomy",
+                        "langlinks": [
+                            {"lang": "de", "*": "Astronomie"},
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    def fake_sitelinks(sess, project, title):
+        return {}  # Wikidata has no entry for the missing language either
+
+    monkeypatch.setattr(api_client, "get_wikidata_sitelinks", fake_sitelinks)
+
+    found, missing = resolve_cross_language(session, "en.wikipedia", "Astronomy", ["de", "xx"])
+
+    assert found == {"de": "Astronomie"}
+    assert missing == ["xx"]
