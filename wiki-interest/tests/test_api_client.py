@@ -291,6 +291,30 @@ def test_get_json_retries_on_429_then_succeeds(requests_mock, session, monkeypat
     assert 2.0 <= sleep_calls[0] < 2.5
 
 
+@pytest.mark.parametrize("bad_value", ["nan", "inf", "-inf"])
+def test_get_json_non_finite_retry_after_falls_back_to_backoff(requests_mock, session, monkeypatch, bad_value):
+    # float() accepts "nan"/"inf"/"-inf" without raising, and NaN's comparison
+    # semantics (nan <= 0 and nan > X are both False) mean it silently defeats
+    # a plain range check -- and time.sleep(nan) raises ValueError for real.
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    url = _mediawiki_url("en.wikipedia")
+    ok_body = {"query": {"pages": {"1": {"title": "Python", "langlinks": [{"lang": "de", "*": "Python"}]}}}}
+    requests_mock.get(
+        url,
+        [
+            {"status_code": 429, "headers": {"Retry-After": bad_value}, "json": {"error": "rate limited"}},
+            {"status_code": 200, "json": ok_body},
+        ],
+    )
+
+    get_langlinks(session, "en.wikipedia", "Python")
+
+    assert len(sleep_calls) == 1
+    assert api_client.BACKOFF_BASE_SECONDS <= sleep_calls[0] < api_client.BACKOFF_BASE_SECONDS + 0.5
+
+
 def test_get_json_over_cap_retry_after_falls_back_to_backoff(requests_mock, session, monkeypatch):
     sleep_calls = []
     monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))

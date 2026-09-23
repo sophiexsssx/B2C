@@ -8,6 +8,7 @@ plain, stateless network call so it's easy to wrap with a cache.
 """
 
 import calendar
+import math
 import os
 import random
 import time
@@ -328,15 +329,17 @@ def _parse_retry_after(retry_after: str):
     """
     Parse Retry-After (an integer number of seconds or an HTTP-date) into a
     wait in seconds. Returns None -- so the caller falls back to exponential
-    backoff -- if the value is invalid, already in the past, or exceeds
-    MAX_RETRY_AFTER_SECONDS (a huge or misconfigured value shouldn't be able
-    to stall the client indefinitely).
+    backoff -- if the value is invalid (including non-finite, e.g. "nan" or
+    "inf" -- float() accepts both without raising, and NaN's comparison
+    semantics mean it silently defeats a plain `seconds <= 0` check), already
+    in the past, or exceeds MAX_RETRY_AFTER_SECONDS (a huge or misconfigured
+    value shouldn't be able to stall the client indefinitely).
     """
     try:
         seconds = float(retry_after)
     except ValueError:
         seconds = _parse_retry_after_http_date(retry_after)
-    if seconds is None or seconds <= 0 or seconds > MAX_RETRY_AFTER_SECONDS:
+    if seconds is None or not math.isfinite(seconds) or seconds <= 0 or seconds > MAX_RETRY_AFTER_SECONDS:
         return None
     return seconds
 
