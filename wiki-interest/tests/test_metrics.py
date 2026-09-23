@@ -167,6 +167,59 @@ def test_yoy_growth_short_requested_period_uses_reference_baseline():
     assert result["used_reference_baseline"] is True
 
 
+def test_yoy_growth_insufficient_history_does_not_report_spurious_growth():
+    # 18 months of GENUINELY FLAT traffic (100 views every month, no real
+    # trend at all). last12 gets a full 12 months (sum 1200), but prev12
+    # only has 6 real months before that (sum 600) -- comparing a full
+    # window against a half window would report "+100% growth" purely from
+    # the length mismatch, not a real trend. Must be flagged instead.
+    monthly = _series("2022-01", 18, 100)
+
+    result = compute_yoy_growth(monthly, period_start="2022-01", period_end="2023-06")
+
+    assert result["value"] is None
+    assert result["flag"] == "insufficient_history"
+
+
+def test_yoy_growth_prev12_completely_empty_is_insufficient_history_not_new_or_dormant():
+    # Only 3 months of history exist at all (e.g. a brand-new article) --
+    # prev12 is completely empty. This must be "insufficient_history", not
+    # silently reclassified as "new_or_dormant" (which would imply we know
+    # there was zero prior activity, when really we just have no data).
+    monthly = _series("2026-01", 3, 50)
+
+    result = compute_yoy_growth(monthly, period_start="2026-01", period_end="2026-03")
+
+    assert result["value"] is None
+    assert result["flag"] == "insufficient_history"
+
+
+def test_yoy_growth_both_windows_full_still_computes_normally():
+    # Sanity check the fix doesn't over-trigger: 24 full months (both
+    # windows have exactly 12) must still compute a real value, unaffected.
+    monthly = {}
+    monthly.update(_series("2022-01", 12, 100))
+    monthly.update(_series("2023-01", 12, 150))
+
+    result = compute_yoy_growth(monthly, period_start="2022-01", period_end="2023-12")
+
+    assert result["value"] == pytest.approx(0.5)
+    assert result["flag"] is None
+
+
+def test_confidence_explains_insufficient_history_flag():
+    level, reason = compute_confidence(
+        yoy_growth_value=None,
+        yoy_growth_flag="insufficient_history",
+        share_yoy_growth_value=None,
+        significant=False,
+        history_months=18,
+        match_confidence="high",
+    )
+    assert level == "low"
+    assert "history" in reason.lower()
+
+
 # ---------------------------------------------------------------------------
 # 3. compute_share_yoy_growth
 # ---------------------------------------------------------------------------
@@ -191,6 +244,20 @@ def test_share_yoy_growth_negative_despite_raw_views_growing():
 
     assert share["value"] == pytest.approx(-0.4)
     assert share["value"] < 0
+
+
+def test_share_yoy_growth_insufficient_history_does_not_report_spurious_value():
+    # Same unequal-window-length problem as compute_yoy_growth: 18 months
+    # of flat article and site traffic (share is genuinely constant), but
+    # prev12 only has 6 real months -- must flag rather than compute a
+    # misleading share-growth figure.
+    article_monthly = _series("2022-01", 18, 100)
+    site_monthly = _series("2022-01", 18, 1000)
+
+    result = compute_share_yoy_growth(article_monthly, site_monthly, period_end="2023-06")
+
+    assert result["value"] is None
+    assert result["flag"] == "insufficient_history"
 
 
 # ---------------------------------------------------------------------------

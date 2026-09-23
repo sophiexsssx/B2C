@@ -190,6 +190,16 @@ def compute_yoy_growth(spike_free_monthly: dict, period_start: str, period_end: 
     If `period_end` is the current in-progress month, it's excluded (see
     _clamp_to_complete_month) so a partial month never distorts the sum.
 
+    If either the last-12-month or previous-12-month window has fewer than
+    12 actual months available (e.g. a recently-created article without
+    ~24 months of total history yet), the two windows would be unequal
+    length -- comparing a full 12-month sum against a partial one produces
+    a growth figure driven purely by that mismatch, not a real trend (a
+    perfectly flat 18-month series of constant views reports "+100%
+    growth" this way, since the prior window only has 6 real months summed
+    against a full 12-month current window). In that case: value=None,
+    flag="insufficient_history", instead of a misleading number.
+
     Returns {"value": float|None, "flag": str|None,
              "used_reference_baseline": bool, "excluded_incomplete_month": bool}.
     """
@@ -199,8 +209,15 @@ def compute_yoy_growth(spike_free_monthly: dict, period_start: str, period_end: 
         return {"value": None, "flag": "flat", "used_reference_baseline": False, "excluded_incomplete_month": excluded_incomplete_month}
     prev12 = _last_n_months(spike_free_monthly, _shift_month(last12[0], -1), 12)
     used_reference_baseline = bool(prev12) and prev12[0] < period_start
+    if len(last12) < 12 or len(prev12) < 12:
+        return {
+            "value": None,
+            "flag": "insufficient_history",
+            "used_reference_baseline": used_reference_baseline,
+            "excluded_incomplete_month": excluded_incomplete_month,
+        }
     current_sum = _sum_months(spike_free_monthly, last12)
-    prior_sum = _sum_months(spike_free_monthly, prev12) if prev12 else 0
+    prior_sum = _sum_months(spike_free_monthly, prev12)
     value, flag = _growth_with_zero_handling(current_sum, prior_sum)
     return {
         "value": value,
@@ -217,17 +234,23 @@ def compute_share_yoy_growth(spike_free_article_monthly: dict, spike_free_site_m
     from platform-wide traffic trends. share_prev is zero exactly when
     article_prev is zero, since a real wiki's site total is never zero.
     Excludes an in-progress current month the same way compute_yoy_growth does.
+
+    Same insufficient-history guard as compute_yoy_growth: if either window
+    has fewer than 12 real months, returns value=None,
+    flag="insufficient_history" rather than comparing unequal-length sums.
     """
     period_end, excluded_incomplete_month = _clamp_to_complete_month(period_end, today)
     last12 = _last_n_months(spike_free_article_monthly, period_end, 12)
     if not last12:
         return {"value": None, "flag": "flat", "excluded_incomplete_month": excluded_incomplete_month}
     prev12 = _last_n_months(spike_free_article_monthly, _shift_month(last12[0], -1), 12)
+    if len(last12) < 12 or len(prev12) < 12:
+        return {"value": None, "flag": "insufficient_history", "excluded_incomplete_month": excluded_incomplete_month}
 
     article_current = _sum_months(spike_free_article_monthly, last12)
-    article_prior = _sum_months(spike_free_article_monthly, prev12) if prev12 else 0
+    article_prior = _sum_months(spike_free_article_monthly, prev12)
     site_current = _sum_months(spike_free_site_monthly, last12)
-    site_prior = _sum_months(spike_free_site_monthly, prev12) if prev12 else 0
+    site_prior = _sum_months(spike_free_site_monthly, prev12)
 
     share_current = (article_current / site_current) if site_current else 0.0
     share_prior = (article_prior / site_prior) if site_prior else 0.0
@@ -377,6 +400,8 @@ def compute_confidence(
     "manually specified, not cross-checked" reason for the override case).
     """
     if yoy_growth_value is None:
+        if yoy_growth_flag == "insufficient_history":
+            return "low", "not enough history for a full 12-month-vs-12-month comparison (the article/data doesn't go back far enough) -- not evidence of a reliable trend"
         why = "no prior-period activity to compare against" if yoy_growth_flag == "new_or_dormant" else "no activity in either period"
         return "low", f"zero baseline for YoY comparison ({why}) -- not evidence of a reliable trend"
 
