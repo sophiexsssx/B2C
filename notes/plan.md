@@ -55,7 +55,7 @@ With many languages: `"ranked":[...top N...],"omitted":7`.
 report --run-id <id from analyze> --format pdf,png,md
 ```
 
-Reads cached series from the run folder, no refetch. Method note states: charts/tables cover only the requested period; N reference months before it (enough to reach ≥36 months total history) were used only to classify peaks as seasonal, and — when the requested period is <24 months — to supply the prior-year YoY baseline. If the reference year shows a materially different long-term picture than the requested-period trend, adds a short "context" note, separate from and not overriding the main conclusion.
+Reads cached series from the run folder, no refetch. Method note states: charts/tables cover only the requested period; N reference months before it — targeting ≥36 months of total history, though shorter when that much data isn't available (article too new, or near the July 2015 data start), in which case the note discloses the actual history length achieved — were used only to classify peaks as seasonal, and — when the requested period is <24 months — to supply the prior-year YoY baseline. If the reference year shows a materially different long-term picture than the requested-period trend, adds a short "context" note, separate from and not overriding the main conclusion.
 
 ```json
 {"run_id":"r_20250922_ab12","files":{"pdf":"cache/runs/r_20250922_ab12/report.pdf",
