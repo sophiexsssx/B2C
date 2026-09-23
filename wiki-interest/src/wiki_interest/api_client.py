@@ -7,6 +7,7 @@ was built from. Disk caching is a later milestone; every function here is a
 plain, stateless network call so it's easy to wrap with a cache.
 """
 
+import calendar
 import os
 import random
 import time
@@ -107,7 +108,7 @@ def get_pageviews_per_article(session, project, article, start, end, access="all
     encoded_article = urllib.parse.quote(article, safe="")
     url = (
         f"{PAGEVIEWS_BASE}/per-article/{project}/{access}/{agent}/"
-        f"{encoded_article}/monthly/{_to_timestamp(start)}/{_to_timestamp(end)}"
+        f"{encoded_article}/monthly/{_to_start_timestamp(start)}/{_to_end_timestamp(end)}"
     )
     items = _fetch_pageview_items(session, url, article, project, start, end)
     return _materialize_zero_months(items, start, end)
@@ -122,7 +123,7 @@ def get_pageviews_aggregate(session, project, start, end, access="all-access", a
     as get_pageviews_per_article.
     """
     _check_in_range(start)
-    url = f"{PAGEVIEWS_BASE}/aggregate/{project}/{access}/{agent}/monthly/{_to_timestamp(start)}/{_to_timestamp(end)}"
+    url = f"{PAGEVIEWS_BASE}/aggregate/{project}/{access}/{agent}/monthly/{_to_start_timestamp(start)}/{_to_end_timestamp(end)}"
     items = _fetch_pageview_items(session, url, None, project, start, end)
     return _materialize_zero_months(items, start, end)
 
@@ -250,10 +251,24 @@ def _fetch_pageview_items(session, url, article, project, start, end):
     return data.get("items", [])
 
 
-def _to_timestamp(yyyymm: str) -> str:
-    """"2025-01" -> "2025010100" (first day, hour 00 -- the format this API uses)."""
+def _to_start_timestamp(yyyymm: str) -> str:
+    """"2025-01" -> "2025010100" (first day, hour 00 -- the natural start of that month)."""
     year, month = yyyymm.split("-")
     return f"{year}{month}0100"
+
+
+def _to_end_timestamp(yyyymm: str) -> str:
+    """
+    "2025-12" -> "2025123100" (LAST day of the month, hour 00).
+
+    Using the first day here (as the start timestamp does) truncates the
+    whole end month to a near-empty partial sum instead of its full total --
+    verified against the live API: an end of "2025120100" returned 20 views
+    for a month whose true total (with end="2025123100") was 622.
+    """
+    year, month = (int(part) for part in yyyymm.split("-"))
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}{month:02d}{last_day:02d}00"
 
 
 def _from_timestamp(timestamp: str) -> str:

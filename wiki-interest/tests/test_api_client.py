@@ -6,6 +6,7 @@ by the `requests-mock` package) -- no real network calls are made. Env vars
 are set with monkeypatch, never mutated directly.
 """
 
+import calendar
 import urllib.parse
 
 import pytest
@@ -37,16 +38,25 @@ def _mediawiki_url(project: str) -> str:
     return f"https://{project}.org/w/api.php"
 
 
+def _start_ts(yyyymm: str) -> str:
+    return f"{yyyymm.replace('-', '')}0100"
+
+
+def _end_ts(yyyymm: str) -> str:
+    # End-of-range must use the LAST day of the month, not the first -- see
+    # test_per_article_end_month_uses_last_day_of_month for why.
+    year, month = (int(p) for p in yyyymm.split("-"))
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}{month:02d}{last_day:02d}00"
+
+
 def _per_article_url(project, article, start, end, access="all-access", agent="user"):
     encoded = urllib.parse.quote(article, safe="")
-    return (
-        f"{PAGEVIEWS_BASE}/per-article/{project}/{access}/{agent}/"
-        f"{encoded}/monthly/{start.replace('-', '')}0100/{end.replace('-', '')}0100"
-    )
+    return f"{PAGEVIEWS_BASE}/per-article/{project}/{access}/{agent}/{encoded}/monthly/{_start_ts(start)}/{_end_ts(end)}"
 
 
 def _aggregate_url(project, start, end, access="all-access", agent="user"):
-    return f"{PAGEVIEWS_BASE}/aggregate/{project}/{access}/{agent}/monthly/{start.replace('-', '')}0100/{end.replace('-', '')}0100"
+    return f"{PAGEVIEWS_BASE}/aggregate/{project}/{access}/{agent}/monthly/{_start_ts(start)}/{_end_ts(end)}"
 
 
 @pytest.fixture
@@ -113,6 +123,33 @@ def test_aggregate_fills_missing_months_with_zero(requests_mock, session):
         {"month": "2024-02", "views": 0},
         {"month": "2024-03", "views": 0},
     ]
+
+
+def test_per_article_end_month_uses_last_day_of_month(requests_mock, session):
+    # The end timestamp must be the LAST day of the end month, not the first --
+    # using day 01 silently truncates the whole end month to a near-empty
+    # partial sum instead of its full total. Verified against the live API:
+    # end="...2025120100" (day 01) returned 20 views for uk.wikipedia
+    # "Астрономія" in December 2025, vs. 622 with end="...2025123100" (day 31).
+    url = _per_article_url("en.wikipedia", "Astronomy", "2024-01", "2024-12")
+    assert url.endswith("/2024010100/2024123100")
+    requests_mock.get(url, json={"items": [{"timestamp": "2024123100", "views": 622}]})
+
+    result = get_pageviews_per_article(session, "en.wikipedia", "Astronomy", "2024-01", "2024-12")
+
+    assert result[-1] == {"month": "2024-12", "views": 622}
+
+
+def test_aggregate_end_month_uses_last_day_of_month(requests_mock, session):
+    # 2024 is a leap year -- February's last day is the 29th, not the 28th,
+    # confirming this uses calendar.monthrange rather than a fixed day count.
+    url = _aggregate_url("en.wikipedia", "2024-02", "2024-02")
+    assert url.endswith("/2024020100/2024022900")
+    requests_mock.get(url, json={"items": [{"timestamp": "2024020100", "views": 42}]})
+
+    result = get_pageviews_aggregate(session, "en.wikipedia", "2024-02", "2024-02")
+
+    assert result == [{"month": "2024-02", "views": 42}]
 
 
 def test_per_article_empty_items_produces_full_zero_series(requests_mock, session):
