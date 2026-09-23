@@ -11,6 +11,7 @@ import os
 import random
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 import requests
@@ -23,6 +24,10 @@ DATA_START_YYYYMM = "2015-07"
 
 MAX_RETRIES = 5
 BACKOFF_BASE_SECONDS = 1.0
+# A server-supplied Retry-After beyond this is treated as unusable (falls
+# back to exponential backoff instead), so a huge or misconfigured value
+# can't stall the client indefinitely.
+MAX_RETRY_AFTER_SECONDS = 60.0
 
 # Wikidata site-key -> langlinks-style language code, for the handful of
 # wikis where the two APIs name the same edition differently (notes/api.md Q3).
@@ -286,7 +291,8 @@ def _get_json(session: requests.Session, url: str, params: dict = None) -> dict:
         response = session.get(url, params=params, timeout=15)
         if response.status_code == 429 or response.status_code >= 500:
             last_error = requests.HTTPError(f"{response.status_code} from {response.url}", response=response)
-            _sleep_for_retry(attempt, response.headers.get("Retry-After"))
+            if attempt < MAX_RETRIES - 1:
+                _sleep_for_retry(attempt, response.headers.get("Retry-After"))
             continue
         if response.status_code == 404:
             raise _NotFoundResponse()
@@ -296,7 +302,7 @@ def _get_json(session: requests.Session, url: str, params: dict = None) -> dict:
 
 
 def _sleep_for_retry(attempt: int, retry_after: str) -> None:
-    """Sleep before a retry: honor Retry-After if present, else exponential backoff with jitter."""
+    """Sleep before a retry: honor Retry-After if present and usable, else exponential backoff with jitter."""
     seconds = _parse_retry_after(retry_after) if retry_after else None
     if seconds is None:
         seconds = BACKOFF_BASE_SECONDS * (2**attempt)
@@ -304,13 +310,28 @@ def _sleep_for_retry(attempt: int, retry_after: str) -> None:
 
 
 def _parse_retry_after(retry_after: str):
-    """Retry-After is either an integer number of seconds or an HTTP-date."""
+    """
+    Parse Retry-After (an integer number of seconds or an HTTP-date) into a
+    wait in seconds. Returns None -- so the caller falls back to exponential
+    backoff -- if the value is invalid, already in the past, or exceeds
+    MAX_RETRY_AFTER_SECONDS (a huge or misconfigured value shouldn't be able
+    to stall the client indefinitely).
+    """
     try:
-        return float(retry_after)
+        seconds = float(retry_after)
     except ValueError:
-        pass
+        seconds = _parse_retry_after_http_date(retry_after)
+    if seconds is None or seconds <= 0 or seconds > MAX_RETRY_AFTER_SECONDS:
+        return None
+    return seconds
+
+
+def _parse_retry_after_http_date(retry_after: str):
+    """Parse an HTTP-date Retry-After value; a timezone-naive result is treated as UTC."""
     try:
         target = parsedate_to_datetime(retry_after)
-        return max(0.0, (target - target.now(target.tzinfo)).total_seconds())
     except (TypeError, ValueError):
         return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    return (target - datetime.now(timezone.utc)).total_seconds()

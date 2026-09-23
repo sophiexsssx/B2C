@@ -254,6 +254,79 @@ def test_get_json_retries_on_429_then_succeeds(requests_mock, session, monkeypat
     assert 2.0 <= sleep_calls[0] < 2.5
 
 
+def test_get_json_over_cap_retry_after_falls_back_to_backoff(requests_mock, session, monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    url = _mediawiki_url("en.wikipedia")
+    ok_body = {"query": {"pages": {"1": {"title": "Python", "langlinks": [{"lang": "de", "*": "Python"}]}}}}
+    huge_retry_after = str(api_client.MAX_RETRY_AFTER_SECONDS + 1)
+    requests_mock.get(
+        url,
+        [
+            {"status_code": 429, "headers": {"Retry-After": huge_retry_after}, "json": {"error": "rate limited"}},
+            {"status_code": 200, "json": ok_body},
+        ],
+    )
+
+    get_langlinks(session, "en.wikipedia", "Python")
+
+    # A Retry-After beyond the cap must not be honored -- falls back to the
+    # attempt-0 exponential backoff (BACKOFF_BASE_SECONDS, plus jitter), not
+    # anywhere near the huge value the server sent.
+    assert len(sleep_calls) == 1
+    assert api_client.BACKOFF_BASE_SECONDS <= sleep_calls[0] < api_client.BACKOFF_BASE_SECONDS + 0.5
+
+
+def test_get_json_past_retry_after_falls_back_to_backoff(requests_mock, session, monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    url = _mediawiki_url("en.wikipedia")
+    ok_body = {"query": {"pages": {"1": {"title": "Python", "langlinks": [{"lang": "de", "*": "Python"}]}}}}
+    past_date = "Wed, 21 Oct 2015 07:28:00 GMT"  # long in the past
+    requests_mock.get(
+        url,
+        [
+            {"status_code": 429, "headers": {"Retry-After": past_date}, "json": {"error": "rate limited"}},
+            {"status_code": 200, "json": ok_body},
+        ],
+    )
+
+    get_langlinks(session, "en.wikipedia", "Python")
+
+    # A past Retry-After must not be honored as a ~0s immediate retry --
+    # falls back to exponential backoff like any other unusable value.
+    assert len(sleep_calls) == 1
+    assert api_client.BACKOFF_BASE_SECONDS <= sleep_calls[0] < api_client.BACKOFF_BASE_SECONDS + 0.5
+
+
+def test_get_json_naive_http_date_retry_after_treated_as_utc(requests_mock, session, monkeypatch):
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    from datetime import datetime, timedelta, timezone
+
+    url = _mediawiki_url("en.wikipedia")
+    ok_body = {"query": {"pages": {"1": {"title": "Python", "langlinks": [{"lang": "de", "*": "Python"}]}}}}
+    # No timezone marker -- must be treated as UTC, not the test runner's local time.
+    naive_future = (datetime.now(timezone.utc) + timedelta(seconds=10)).strftime("%a, %d %b %Y %H:%M:%S")
+    requests_mock.get(
+        url,
+        [
+            {"status_code": 429, "headers": {"Retry-After": naive_future}, "json": {"error": "rate limited"}},
+            {"status_code": 200, "json": ok_body},
+        ],
+    )
+
+    get_langlinks(session, "en.wikipedia", "Python")
+
+    assert len(sleep_calls) == 1
+    # ~10s +/- jitter/test-runtime slack; if this were wrongly compared against
+    # local time on a non-UTC machine it would be off by hours, not seconds.
+    assert 8.0 <= sleep_calls[0] < 11.0
+
+
 # ---------------------------------------------------------------------------
 # 5. 5xx handling
 # ---------------------------------------------------------------------------
@@ -286,7 +359,8 @@ def test_get_json_retries_on_503_then_succeeds(requests_mock, session, monkeypat
 
 
 def test_get_json_raises_after_retries_exhausted(requests_mock, session, monkeypatch):
-    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: None)
+    sleep_calls = []
+    monkeypatch.setattr(api_client.time, "sleep", lambda seconds: sleep_calls.append(seconds))
 
     url = _mediawiki_url("en.wikipedia")
     responses = [{"status_code": 503, "json": {"error": "down"}} for _ in range(api_client.MAX_RETRIES)]
@@ -296,6 +370,9 @@ def test_get_json_raises_after_retries_exhausted(requests_mock, session, monkeyp
         get_langlinks(session, "en.wikipedia", "Python")
 
     assert requests_mock.call_count == api_client.MAX_RETRIES
+    # No sleep after the final failed attempt -- the result is discarded via
+    # `raise last_error` immediately after, so waiting there is pure waste.
+    assert len(sleep_calls) == api_client.MAX_RETRIES - 1
 
 
 # ---------------------------------------------------------------------------
