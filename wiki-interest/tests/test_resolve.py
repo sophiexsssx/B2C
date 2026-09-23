@@ -231,3 +231,67 @@ def test_redirects_fetched_against_resolved_language_own_domain(requests_mock, s
     assert redirect_requests[0].qs.get("prop") == ["redirects"]
     # never queried the source project's own domain for redirects
     assert not any(r.url.startswith(project_url) and "prop=redirects" in r.url for r in requests_mock.request_history)
+
+
+# ---------------------------------------------------------------------------
+# 6. Source language identity match
+# ---------------------------------------------------------------------------
+
+
+def test_source_language_resolves_via_identity_not_langlinks(requests_mock, session):
+    # A page never links to its own language edition (langlinks.get("en")
+    # is always None for an en.wikipedia article), and even when Wikidata
+    # sitelinks happens to include the source wiki's own entry, there's
+    # nothing to cross-check -- "en" must still resolve to `title` directly
+    # via identity, not end up "missing" or treated as single-source.
+    #
+    # Since "en" now correctly resolves, resolve_topic also fetches its
+    # redirects -- from the SAME en.wikipedia domain as the langlinks/
+    # pageprops calls, so this needs one callback that branches on `prop`
+    # rather than two separate requests_mock.get() registrations for the
+    # same URL (the second would just shadow the first).
+    project_url = _mediawiki_url("en.wikipedia")
+    qid = "Q333"
+
+    def _en_wikipedia_callback(request, context):
+        prop = (request.qs.get("prop") or [None])[0]
+        if prop == "redirects":
+            return _redirects_json("Astronomy", ["Astronomical"])
+        return _project_responder({"de": "Astronomie"}, qid)(request, context)
+
+    requests_mock.get(project_url, json=_en_wikipedia_callback)
+    # Wikidata sitelinks DO include the source wiki's own entry (verified
+    # against the live API) -- included here to prove it's still excluded.
+    requests_mock.get(WIKIDATA_API, json=_sitelinks_json(qid, {"en": "Astronomy", "de": "Astronomie"}))
+    _register_redirects(requests_mock, "de", "Astronomie", [])
+
+    result = resolve_topic(session, "en.wikipedia", "Astronomy", ["en", "de"])
+
+    assert result["editions"]["en"] == "Astronomy"
+    assert "en" not in result["missing"]
+    assert result["redirects"]["en"] == ["Astronomical"]
+    # the source language must not count as single-source and drag confidence down
+    assert result["match_confidence"] == "high"
+    assert "en" not in result["reason"]
+
+
+def test_source_language_resolves_even_with_no_wikidata_item(requests_mock, session):
+    # No QID at all (sitelinks never fetched) -- "en" must still resolve via
+    # identity and must never be reported missing, regardless of whether
+    # any cross-language data exists at all.
+    project_url = _mediawiki_url("en.wikipedia")
+
+    def _en_wikipedia_callback(request, context):
+        prop = (request.qs.get("prop") or [None])[0]
+        if prop == "redirects":
+            return _redirects_json("SomeArticle", [])
+        return _project_responder({}, qid=None)(request, context)
+
+    requests_mock.get(project_url, json=_en_wikipedia_callback)
+
+    result = resolve_topic(session, "en.wikipedia", "SomeArticle", ["en", "de"])
+
+    assert result["qid"] is None
+    assert result["editions"]["en"] == "SomeArticle"
+    assert "en" not in result["missing"]
+    assert result["missing"] == ["de"]

@@ -31,6 +31,11 @@ def resolve_topic(session, project, title, target_langs):
             "reason": str,
         }
     """
+    # "en.wikipedia" -> "en", matching the plain lang codes used in
+    # target_langs -- consistent with how `project` is used everywhere
+    # else in this codebase (e.g. _mediawiki_api_url).
+    source_lang = project.split(".")[0]
+
     langlinks = api_client.get_langlinks(session, project, title)
     qid = api_client.get_wikidata_qid(session, project, title)
     sitelinks = api_client.get_wikidata_sitelinks(session, project, title) if qid else {}
@@ -39,6 +44,16 @@ def resolve_topic(session, project, title, target_langs):
     disagreements = []
     single_source = []
     for lang in target_langs:
+        if lang == source_lang:
+            # The source language IS `title` by definition -- not a
+            # langlink/sitelink lookup at all. A page never links to its
+            # own language edition (so langlinks never has it) and, even
+            # when Wikidata sitelinks happens to include the source wiki's
+            # own entry, there's nothing here to cross-check -- excluded
+            # from the disagreement/single-source checks entirely so it
+            # can never be reported "missing" or downgrade confidence.
+            editions[lang] = title
+            continue
         from_langlinks = langlinks.get(lang)
         from_sitelinks = sitelinks.get(lang)
         if from_langlinks and from_sitelinks:
