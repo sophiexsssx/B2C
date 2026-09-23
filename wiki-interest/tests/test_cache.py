@@ -112,6 +112,36 @@ def test_save_and_load_run_data_round_trips_and_creates_run_dir(tmp_path):
     assert loaded == data
 
 
+def test_save_run_data_returns_the_run_id_used():
+    run_id = cache.generate_run_id()
+    returned = cache.save_run_data(run_id, {"a": 1})
+    assert returned == run_id
+
+
+def test_save_run_data_retries_on_run_id_collision(monkeypatch):
+    # A colliding run_id must never let the new run overwrite the old run's
+    # data -- save_run_data should detect the collision (via exclusive
+    # directory creation) and retry with a freshly generated id instead.
+    taken_id = "r_20260101_aaaaaa"
+    cache.save_run_data(taken_id, {"old": "data"})
+
+    fresh_id = "r_20260101_bbbbbb"
+    calls = []
+
+    def fake_generate_run_id():
+        calls.append(1)
+        return fresh_id
+
+    monkeypatch.setattr(cache, "generate_run_id", fake_generate_run_id)
+
+    used_id = cache.save_run_data(taken_id, {"new": "data"})
+
+    assert used_id == fresh_id
+    assert len(calls) == 1
+    assert cache.load_run_data(taken_id) == {"old": "data"}  # untouched
+    assert cache.load_run_data(fresh_id) == {"new": "data"}
+
+
 # ---------------------------------------------------------------------------
 # 6. max_age_seconds expiry (get_cached_json)
 # ---------------------------------------------------------------------------

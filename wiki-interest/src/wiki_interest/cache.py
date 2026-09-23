@@ -113,9 +113,33 @@ def run_dir(run_id: str) -> str:
     return path
 
 
-def save_run_data(run_id: str, data: dict) -> None:
-    path = os.path.join(run_dir(run_id), "run.json")
-    _atomic_write_json(path, data, indent=2)
+def save_run_data(run_id: str, data: dict) -> str:
+    """
+    Reserve `run_id`'s directory exclusively and write `data` as its
+    run.json, retrying with a freshly generated run_id if the one given is
+    already taken.
+
+    generate_run_id()'s random suffix (24 bits, refreshed daily) can
+    theoretically collide -- a real risk across many runs generated in one
+    day, e.g. an eval batch. run_dir() uses exist_ok=True so load_run_data
+    can open an existing run's directory, but that same leniency would let
+    a brand-new run silently overwrite an unrelated old run's saved data on
+    collision, with no error. This reserves the directory with exclusive
+    creation first and retries on FileExistsError instead.
+
+    Returns the run_id actually used -- equal to the one passed in unless a
+    collision forced a retry; callers must use this return value, not just
+    the run_id they originally passed in.
+    """
+    while True:
+        path = os.path.join(cache_dir(), "runs", run_id)
+        try:
+            os.makedirs(path, exist_ok=False)
+            break
+        except FileExistsError:
+            run_id = generate_run_id()
+    _atomic_write_json(os.path.join(path, "run.json"), data, indent=2)
+    return run_id
 
 
 def load_run_data(run_id: str) -> dict:
