@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import random
+import tempfile
 import time
 
 _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # wiki-interest/src -> wiki-interest
@@ -26,6 +27,32 @@ def cache_key(**kwargs) -> str:
     """A deterministic key from keyword args (e.g. project/article/agent/start/end)."""
     payload = json.dumps(kwargs, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def _atomic_write_json(path: str, payload, indent=None) -> None:
+    """
+    Write `payload` as JSON to `path` atomically: serialize to a temp file
+    in the same directory, then os.replace() it into place. A concurrent
+    reader (cached_call is explicitly meant for repeated/parallel fetches;
+    `report` reads a run.json that `analyze` wrote) -- or this process
+    crashing mid-write -- can then only ever see the old complete file or
+    the new complete one, never a truncated or partially-written one, which
+    a plain open(path, "w") + json.dump would risk.
+    """
+    directory = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_cached_json(key: str, max_age_seconds: float = None):
@@ -58,8 +85,7 @@ def set_cached_json(key: str, value) -> None:
     directory = os.path.join(cache_dir(), "api")
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{key}.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"value": value, "fetched_at": time.time()}, f)
+    _atomic_write_json(path, {"value": value, "fetched_at": time.time()})
 
 
 def cached_call(key: str, fetch_fn, max_age_seconds: float = None):
@@ -89,8 +115,7 @@ def run_dir(run_id: str) -> str:
 
 def save_run_data(run_id: str, data: dict) -> None:
     path = os.path.join(run_dir(run_id), "run.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    _atomic_write_json(path, data, indent=2)
 
 
 def load_run_data(run_id: str) -> dict:
