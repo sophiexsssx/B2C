@@ -186,7 +186,7 @@ def get_wikidata_sitelinks(session, project, title):
     limited to Wikipedia editions (sister projects like Commons excluded),
     with known legacy site-key aliases normalized to langlinks' codes.
     """
-    qid = _get_wikidata_qid(session, project, title)
+    qid = get_wikidata_qid(session, project, title)
     if qid is None:
         return {}
     params = {"action": "wbgetentities", "ids": qid, "props": "sitelinks", "format": "json"}
@@ -231,7 +231,7 @@ def _mediawiki_api_url(project: str) -> str:
     return f"https://{project}.org/w/api.php"
 
 
-def _get_wikidata_qid(session, project, title):
+def get_wikidata_qid(session, project, title):
     """Resolve the Wikidata item id (QID) for `title` on `project`, or None if it has none."""
     url = _mediawiki_api_url(project)
     params = {"action": "query", "titles": title, "prop": "pageprops", "ppprop": "wikibase_item", "format": "json"}
