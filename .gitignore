@@ -1,0 +1,14 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime data of the skill
+wiki-interest/cache/
+
+# Secrets
+.env
+
+# macOS
+.DS_Store
