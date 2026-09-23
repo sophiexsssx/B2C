@@ -351,6 +351,31 @@ def test_confidence_short_history_downgrades_level():
     assert "history" in downgraded_reason.lower() or "12mo" in downgraded_reason
 
 
+def test_confidence_distinguishes_insufficient_data_from_tested_not_significant():
+    # "we tested and found no trend" and "there wasn't enough data to test
+    # at all" are very different levels of evidence and must get different
+    # reasons, not the same generic "not significant" message.
+    kwargs = dict(
+        yoy_growth_value=0.1,
+        yoy_growth_flag=None,
+        share_yoy_growth_value=0.1,
+        significant=False,
+        history_months=36,
+        match_confidence="high",
+    )
+
+    tested, tested_reason = compute_confidence(significance_insufficient_data=False, **kwargs)
+    assert "not statistically significant" in tested_reason
+    assert "too few" not in tested_reason
+
+    untested, untested_reason = compute_confidence(significance_insufficient_data=True, **kwargs)
+    assert "too few" in untested_reason
+    assert "could not be tested" in untested_reason
+
+    # both still count as "not significant" for downgrade purposes
+    assert tested == untested == "medium"
+
+
 def test_confidence_share_yoy_sign_disagreement_forces_low():
     level, reason = compute_confidence(
         yoy_growth_value=0.5,

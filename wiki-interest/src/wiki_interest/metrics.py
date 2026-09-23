@@ -434,6 +434,7 @@ def compute_confidence(
     significant,
     history_months,
     match_confidence,
+    significance_insufficient_data=False,
 ) -> tuple:
     """
     Always returns (level, reason) -- the assignment's hard requirement that
@@ -446,6 +447,14 @@ def compute_confidence(
     would silently give an unverified manual override the *most* favorable
     rating; callers must pass an explicit value (e.g. "medium" with a
     "manually specified, not cross-checked" reason for the override case).
+
+    `significance_insufficient_data` should be `compute_trend_significance`'s
+    own `insufficient_data` field (e.g. too few years of data for the
+    seasonal Mann-Kendall test to have any usable same-calendar-month pairs
+    to compare across years). Without it, "not significant because we
+    tested and found no trend" and "not significant because there wasn't
+    enough data to test at all" would get the same generic reason, which
+    is misleading -- they're very different levels of evidence.
     """
     if yoy_growth_value is None:
         if yoy_growth_flag == "insufficient_history":
@@ -462,7 +471,10 @@ def compute_confidence(
 
     if not significant:
         level = _CONFIDENCE_DOWNGRADE[level]
-        reasons.append("trend not statistically significant (Mann-Kendall)")
+        if significance_insufficient_data:
+            reasons.append("too few years of data for the seasonal Mann-Kendall test to run (not enough same-calendar-month observations across years) -- trend significance could not be tested")
+        else:
+            reasons.append("trend not statistically significant (Mann-Kendall)")
 
     if share_yoy_growth_value is not None and _sign(share_yoy_growth_value) != _sign(yoy_growth_value):
         level = "low"
