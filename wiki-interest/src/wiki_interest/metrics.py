@@ -55,6 +55,21 @@ def last_complete_month(today=None) -> str:
     return _shift_month(current_month(today), -1)
 
 
+DEFAULT_PERIOD_MONTHS = 24
+
+
+def default_period(today=None) -> tuple:
+    """
+    (start, end) to use when the caller gives no explicit --start/--end:
+    the last DEFAULT_PERIOD_MONTHS (24) complete months before today,
+    never including the current in-progress month -- same reasoning as
+    last_complete_month. E.g. today="2026-09-24" -> ("2024-09", "2026-08").
+    """
+    end = last_complete_month(today)
+    start = _shift_month(end, -(DEFAULT_PERIOD_MONTHS - 1))
+    return start, end
+
+
 # ---------------------------------------------------------------------------
 # Spike vs. seasonal classification
 # ---------------------------------------------------------------------------
@@ -73,25 +88,50 @@ def _mad(values, med):
     return _median([abs(v - med) for v in values])
 
 
-def detect_elevated_months(monthly: dict) -> set:
-    """
-    A month is elevated if views >= baseline + 3xMAD, where baseline=median
-    and MAD=median absolute deviation over every month in `monthly` (robust
-    to the outliers being detected).
+ROLLING_BASELINE_WINDOW_MONTHS = 7
 
-    MAD==0 fallback: the threshold would otherwise collapse to `baseline`
-    (e.g. a sparse, mostly-zero-view series) -- if baseline is also 0, every
-    non-negative view count would trivially satisfy ">= 0", wrongly flagging
-    zero-view months. So when MAD==0, a month is elevated only if
-    views > baseline AND views > 0.
+
+def detect_elevated_months(monthly: dict, window: int = ROLLING_BASELINE_WINDOW_MONTHS) -> set:
     """
-    values = list(monthly.values())
-    if not values:
+    A month is elevated if its views >= LOCAL baseline + 3xMAD, where the
+    baseline/MAD come from a centered rolling window of `window` months
+    (default 7) around that month -- not one median over the whole series.
+
+    Why local, not global: on a trending series (e.g. steadily declining
+    interest), a global median sits somewhere in the middle of the trend,
+    so a proportionally similar recurring peak can clear the global
+    threshold early on (when the baseline is still high) but fall short of
+    it later (once the baseline has dropped) -- hiding a real recurring
+    pattern instead of just misclassifying an isolated month. Verified
+    against real uk.wikipedia "Astronomiya" data (steadily declining over
+    3 years): a global median flagged only the first of three consecutive,
+    visually-obvious September peaks; a 7-month rolling window correctly
+    flags all three as elevated (a 5-month window still misses the middle
+    one by a narrow margin, so 7 was chosen deliberately, not just as the
+    smallest window that happens to work for this one series).
+
+    Edge months (near the start/end of `monthly`) get a naturally shorter,
+    still-centered-as-possible window, since there's nothing before/after
+    them to include.
+
+    MAD==0 fallback: unchanged in spirit, just computed from the local
+    window -- a month is elevated only if views > local baseline AND
+    views > 0 when that window has no spread (e.g. a sparse, mostly
+    zero-view neighborhood).
+    """
+    months_sorted = sorted(monthly.keys())
+    values = [monthly[m] for m in months_sorted]
+    n = len(values)
+    if n == 0:
         return set()
-    baseline = _median(values)
-    spread = _mad(values, baseline)
+    half = window // 2
     elevated = set()
-    for month, views in monthly.items():
+    for i, month in enumerate(months_sorted):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        local_values = values[lo:hi]
+        baseline = _median(local_values)
+        spread = _mad(local_values, baseline)
+        views = values[i]
         if spread == 0:
             if views > baseline and views > 0:
                 elevated.add(month)

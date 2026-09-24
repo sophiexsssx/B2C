@@ -21,6 +21,7 @@ from wiki_interest.metrics import (
     compute_trend_significance,
     compute_yoy_growth,
     current_month,
+    default_period,
     detect_elevated_months,
     is_current_month,
     last_complete_month,
@@ -95,22 +96,53 @@ def test_mad_zero_degenerate_case_detects_single_positive_spike_not_zero_months(
 
 
 def test_elevated_threshold_boundary_below_and_at():
-    # 7 hand-picked points: median=30, MAD=10 -> threshold = baseline + 3*MAD = 60.
-    # 59 (just below) must NOT be elevated; 60 (at the threshold) MUST be.
-    monthly = {
-        "2023-01": 10,
-        "2023-02": 20,
-        "2023-03": 20,
-        "2023-04": 30,
-        "2023-05": 40,
-        "2023-06": 59,
-        "2023-07": 60,
-    }
+    # 7 months, candidate at the CENTER (index 3 of 7) so it gets the full
+    # default 7-month rolling window with no edge clipping. Neighbors
+    # 10/15/20/25/30/35 keep the local median=25, MAD=10 stable across a
+    # wide range of candidate values (verified numerically), so threshold =
+    # 25 + 3*10 = 55 for both cases below. 54 (just below) must NOT be
+    # elevated; 55 (at the threshold) MUST be.
+    monthly_below = {"2023-01": 10, "2023-02": 15, "2023-03": 20, "2023-04": 54, "2023-05": 25, "2023-06": 30, "2023-07": 35}
+    monthly_at = {"2023-01": 10, "2023-02": 15, "2023-03": 20, "2023-04": 55, "2023-05": 25, "2023-06": 30, "2023-07": 35}
+
+    assert "2023-04" not in detect_elevated_months(monthly_below)
+    assert "2023-04" in detect_elevated_months(monthly_at)
+
+
+def test_detect_elevated_months_uses_local_not_global_baseline():
+    # The regression this guards against: a global median hides a
+    # recurring peak on a trending series. Build a steadily DECLINING
+    # series with a proportionally similar bump in the same calendar
+    # month (September) every year -- with a single global median, only
+    # the first (highest-baseline) September clears the threshold; a
+    # rolling local window must catch all three, since each is a clear
+    # local outlier relative to its own neighborhood regardless of the
+    # overall trend. Modeled on real uk.wikipedia data that motivated
+    # this fix (see notes/plan.md).
+    monthly = {}
+    baseline = 4000
+    for year_index, year in enumerate((2023, 2024, 2025)):
+        for month in range(1, 13):
+            if year == 2025 and month > 9:
+                break
+            level = max(300, baseline - year_index * 1600 - month * 80)
+            monthly[f"{year:04d}-{month:02d}"] = level
+    monthly["2023-09"] = 9857
+    monthly["2024-09"] = 4687
+    monthly["2025-09"] = 1642
+
+    global_median = metrics._median(list(monthly.values()))
+    global_mad = metrics._mad(list(monthly.values()), global_median)
+    global_threshold = global_median + 3 * global_mad
+    # Sanity-check the premise: with the OLD global approach, 2024-09 and
+    # 2025-09 would NOT have cleared the threshold.
+    assert monthly["2024-09"] < global_threshold
+    assert monthly["2025-09"] < global_threshold
 
     elevated = detect_elevated_months(monthly)
-
-    assert "2023-06" not in elevated
-    assert "2023-07" in elevated
+    assert "2023-09" in elevated
+    assert "2024-09" in elevated
+    assert "2025-09" in elevated
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +515,32 @@ def test_last_complete_month_year_boundary_rolls_back_to_prior_december():
     # PREVIOUS year, not "month 0" or the current year.
     assert current_month(_TODAY_JAN) == "2026-01"
     assert last_complete_month(_TODAY_JAN) == "2025-12"
+
+
+def test_default_period_matches_the_documented_example():
+    # today=2026-09-24 -> last 24 complete months = 2024-09..2026-08,
+    # never including the current in-progress month (2026-09).
+    today = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    start, end = default_period(today)
+    assert (start, end) == ("2024-09", "2026-08")
+
+
+def test_default_period_is_exactly_24_months_inclusive():
+    start, end = default_period(_TODAY)
+    months = []
+    cursor = start
+    while cursor <= end:
+        months.append(cursor)
+        year, month = (int(p) for p in cursor.split("-"))
+        cursor = f"{year + 1:04d}-01" if month == 12 else f"{year:04d}-{month + 1:02d}"
+    assert len(months) == 24
+    assert end == last_complete_month(_TODAY)
+
+
+def test_default_period_year_boundary():
+    start, end = default_period(_TODAY_JAN)
+    assert end == "2025-12"
+    assert start == "2024-01"  # 24 months back from 2025-12, inclusive
 
 
 # ---------------------------------------------------------------------------
