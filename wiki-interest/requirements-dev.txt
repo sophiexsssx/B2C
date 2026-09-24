@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=7.4,<9
+requests-mock>=1.11,<2
+pypdf>=4.0,<6
