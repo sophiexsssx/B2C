@@ -430,7 +430,8 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     max_table_rows = 8
     rows = all_rows[:max_table_rows]
     omitted_rows = len(all_rows) - len(rows)
-    table = ax_table.table(cellText=rows or [["(no results)"] * len(col_labels)], colLabels=col_labels, loc="center", cellLoc="center")
+    empty_row = [["(no results)"] + [""] * (len(col_labels) - 1)]
+    table = ax_table.table(cellText=rows or empty_row, colLabels=col_labels, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
     n_total_rows = len(rows) + 1  # + header row
     fontsize = 10.5 if n_total_rows <= 5 else 6.5

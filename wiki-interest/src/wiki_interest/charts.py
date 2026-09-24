@@ -86,6 +86,11 @@ def build_trend_chart(
 
     ax.set_title(title, fontsize=11, fontweight="bold")
     ax.set_ylabel("monthly views")
+    if legend_ax is not None:
+        # Hidden regardless of whether there's data to put a legend in --
+        # otherwise the "no data" case leaves a bare, visible axes box in
+        # its dedicated gridspec row.
+        legend_ax.axis("off")
     if plotted_any:
         handles, labels = ax.get_legend_handles_labels()
         # Cap per-language legend entries so a many-language chart doesn't
@@ -103,7 +108,6 @@ def build_trend_chart(
         ncol = min(len(labels), 4) if len(labels) > 3 else len(labels)
         if legend_ax is not None:
             # A dedicated row -- centered within it, can't collide with anything else.
-            legend_ax.axis("off")
             legend_ax.legend(handles, labels, loc="center", fontsize=legend_fontsize, frameon=False, ncol=ncol)
         else:
             # Standalone chart: below the plot, not inside it -- "upper left"
