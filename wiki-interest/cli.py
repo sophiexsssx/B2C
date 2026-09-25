@@ -27,6 +27,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 import requests
 
@@ -165,16 +166,30 @@ def _max_age_for_range(end: str, today=None):
     return CURRENT_MONTH_MAX_AGE_SECONDS if metrics.is_current_month(end, today) else None
 
 
+# Wikimedia's monthly pageview aggregates for a month that just ended
+# aren't necessarily fully loaded on day 1 of the next month -- real-world
+# pipeline lag means a short window past month-end can still plausibly
+# 404 for "not loaded yet" rather than genuinely zero.
+POST_MONTH_END_GRACE_DAYS = 7
+
+
 def _is_recent_range(end: str, today=None) -> bool:
     """
     "Recent" per api_client.AmbiguousNoDataError's documented policy (an
     in-range 404 should stay retryable for a recent period, since Wikimedia
     may simply not have finished loading it yet, vs. treated as likely-zero
-    for an older, fully-in-range one) -- reuses the same is_current_month
-    check _max_age_for_range already relies on for the analogous "this
-    range might still change" cache-TTL decision.
+    for an older, fully-in-range one). Covers the current (in-progress)
+    month AND the month that just completed, for a short grace window into
+    the following month -- by the time this is reached through run_analyze,
+    `end` is always already clamped to a complete month
+    (_validate_and_normalize_period), so checking only is_current_month
+    (as this used to) could never actually be true there, making the
+    "stays retryable" branch unreachable in practice.
     """
-    return metrics.is_current_month(end, today)
+    moment = today or datetime.now(timezone.utc)
+    if metrics.is_current_month(end, moment):
+        return True
+    return end == metrics.last_complete_month(moment) and moment.day <= POST_MONTH_END_GRACE_DAYS
 
 
 def _fetch_article_monthly(session, project, article, start, end, agent, today=None) -> dict:

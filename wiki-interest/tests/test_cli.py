@@ -636,11 +636,23 @@ def _mock_404_for_aggregate(requests_mock, project: str):
     requests_mock.get(pattern, status_code=404, json={"detail": "not found", "status": 404})
 
 
-def test_is_recent_range_matches_is_current_month():
-    today = datetime(2026, 9, 24, tzinfo=timezone.utc)
+def test_is_recent_range_covers_current_month_and_a_post_month_end_grace_window():
+    # The current (in-progress) month is always "recent".
+    assert cli._is_recent_range("2026-09", datetime(2026, 9, 24, tzinfo=timezone.utc)) is True
 
-    assert cli._is_recent_range("2026-09", today) is True
-    assert cli._is_recent_range("2026-08", today) is False
+    # The month that JUST completed is still "recent" (retryable) for a
+    # short grace window into the following month, since run_analyze
+    # always clamps `end` to a complete month before these functions are
+    # ever called -- without this, "recent" could never trigger there at all.
+    assert cli._is_recent_range("2026-08", datetime(2026, 9, 3, tzinfo=timezone.utc)) is True
+
+    # Once well past that grace window, the same "just completed" month is
+    # no longer "recent" -- old behavior for a month that's actually old.
+    assert cli._is_recent_range("2026-08", datetime(2026, 9, 24, tzinfo=timezone.utc)) is False
+
+    # A month further back than "just completed" is never "recent",
+    # regardless of how early in the current month it is.
+    assert cli._is_recent_range("2026-07", datetime(2026, 9, 3, tzinfo=timezone.utc)) is False
 
 
 def test_fetch_site_monthly_404_on_older_range_is_treated_as_zero(requests_mock, session):
