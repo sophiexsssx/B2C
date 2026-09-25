@@ -14,10 +14,10 @@ import requests
 
 from wiki_interest import api_client
 from wiki_interest.api_client import (
+    DEFAULT_CONTACT,
     PAGEVIEWS_BASE,
     WIKIDATA_API,
     AmbiguousNoDataError,
-    ContactNotConfiguredError,
     OutOfRangeError,
     build_session,
     get_langlinks,
@@ -62,8 +62,6 @@ def _aggregate_url(project, start, end, access="all-access", agent="user"):
 
 @pytest.fixture
 def session():
-    # build_session() requires WIKITREND_CONTACT; the plain functions under
-    # test just take a requests.Session, so a bare one is fine here.
     return requests.Session()
 
 
@@ -72,16 +70,21 @@ def session():
 # ---------------------------------------------------------------------------
 
 
-def test_build_session_raises_without_contact(monkeypatch):
+def test_build_session_uses_default_contact_without_env_var(monkeypatch):
+    # WIKITREND_CONTACT is optional -- DEFAULT_CONTACT (this project's own
+    # repo URL) already satisfies Wikimedia's descriptive-User-Agent
+    # requirement on its own, so nothing should ever be REQUIRED to make a
+    # request work.
     monkeypatch.delenv("WIKITREND_CONTACT", raising=False)
-    with pytest.raises(ContactNotConfiguredError):
-        build_session()
+    session = build_session()
+    assert DEFAULT_CONTACT in session.headers["User-Agent"]
 
 
 def test_build_session_sets_user_agent_with_contact(monkeypatch):
     monkeypatch.setenv("WIKITREND_CONTACT", "https://example.org/wiki-interest; sofia@example.org")
     session = build_session()
     assert "https://example.org/wiki-interest; sofia@example.org" in session.headers["User-Agent"]
+    assert DEFAULT_CONTACT not in session.headers["User-Agent"]
 
 
 def test_bare_session_gets_compliant_user_agent_enforced(requests_mock, session, monkeypatch):
@@ -103,13 +106,18 @@ def test_bare_session_gets_compliant_user_agent_enforced(requests_mock, session,
     assert "https://example.org/wiki-interest; sofia@example.org" in sent_ua
 
 
-def test_bare_session_without_contact_raises_even_without_build_session(requests_mock, session, monkeypatch):
-    # Confirms the enforcement doesn't depend on the caller having gone
-    # through build_session() at all -- any entry point must raise.
+def test_bare_session_without_contact_still_works_with_default(requests_mock, session, monkeypatch):
+    # Confirms the DEFAULT_CONTACT fallback doesn't depend on the caller
+    # having gone through build_session() at all -- any entry point works
+    # without WIKITREND_CONTACT set.
     monkeypatch.delenv("WIKITREND_CONTACT", raising=False)
-    with pytest.raises(ContactNotConfiguredError):
-        get_langlinks(session, "en.wikipedia", "Python")
-    assert requests_mock.call_count == 0  # must fail before ever making the request
+    url = _mediawiki_url("en.wikipedia")
+    requests_mock.get(url, json={"query": {"pages": {"1": {"title": "Python", "langlinks": []}}}})
+
+    get_langlinks(session, "en.wikipedia", "Python")
+
+    sent_ua = requests_mock.last_request.headers["User-Agent"]
+    assert DEFAULT_CONTACT in sent_ua
 
 
 # ---------------------------------------------------------------------------
