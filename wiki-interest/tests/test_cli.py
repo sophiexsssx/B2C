@@ -699,3 +699,79 @@ def test_site_aggregate_404_on_older_range_does_not_abort_the_language_loop(requ
     assert by_lang["de"]["yoy_growth_flag"] != "no_data"
     assert by_lang["pl"]["yoy_growth_flag"] != "no_data"
     assert response["missing"] == []
+
+
+# ---------------------------------------------------------------------------
+# 16. _build_headline: zero-growth wording and all-non-positive subject choice
+# ---------------------------------------------------------------------------
+
+
+def _result(lang, yoy_growth, significant=True):
+    return {
+        "lang": lang,
+        "title": lang,
+        "yoy_growth": yoy_growth,
+        "share_yoy_growth": yoy_growth,
+        "momentum_6mo": yoy_growth,
+        "spikes_removed": 0,
+        "seasonal_peaks_kept": 0,
+        "significant": significant,
+        "trend_test": "seasonal_mann_kendall",
+        "confidence": "medium",
+        "reason": "reason",
+    }
+
+
+def test_build_headline_single_language_zero_growth_is_flat_not_declining():
+    run_data = {"topic": "Topic", "results": [_result("de", 0.0)]}
+
+    headline = cli._build_headline(run_data)
+
+    assert "flat" in headline
+    assert "declining" not in headline
+
+
+def test_build_headline_all_non_positive_uses_most_negative_as_subject():
+    # "de" is barely declining, "pl" is declining much harder -- the more
+    # informative headline subject is "pl" (steepest decline), and the
+    # sentence must not claim "de" (the least negative) is declining
+    # FASTER than "pl" (the most negative), which would be backwards.
+    run_data = {"topic": "Topic", "results": [_result("de", -0.05), _result("pl", -0.40)]}
+
+    headline = cli._build_headline(run_data)
+
+    assert headline.startswith("PL")
+    assert "declining faster than DE" in headline
+
+
+def test_build_headline_mixed_growth_still_uses_the_top_grower_as_subject():
+    # Unchanged behavior for the normal (some positive) case: the best
+    # grower is the subject, compared against the worst performer.
+    run_data = {"topic": "Topic", "results": [_result("de", 0.30), _result("pl", -0.10)]}
+
+    headline = cli._build_headline(run_data)
+
+    assert headline.startswith("DE")
+    assert "growing faster than PL" in headline
+
+
+def test_build_headline_all_zero_growth_compares_without_faster_than():
+    run_data = {"topic": "Topic", "results": [_result("de", 0.0), _result("pl", 0.0)]}
+
+    headline = cli._build_headline(run_data)
+
+    assert "flat" in headline
+    assert "faster than" not in headline
+
+
+def test_build_headline_preserves_significance_suffix_on_the_comparison_target():
+    # All non-positive -> top/bottom swap (pl, the most negative, is the
+    # subject; de, the least negative, is the comparison target) -- the
+    # suffix must still follow whichever result ends up as "bottom" after
+    # that swap, same as the original (pre-swap) behavior.
+    run_data = {"topic": "Topic", "results": [_result("de", -0.05, significant=False), _result("pl", -0.40, significant=True)]}
+
+    headline = cli._build_headline(run_data)
+
+    assert headline.startswith("PL")
+    assert "DE trend not significant" in headline

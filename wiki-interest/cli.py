@@ -513,14 +513,25 @@ def _build_headline(run_data: dict) -> str:
     if not with_growth:
         return f'No measurable growth trend for "{topic}" in any requested language.'
     ranked = sorted(with_growth, key=lambda r: r["yoy_growth"], reverse=True)
-    top = ranked[0]
-    top_direction = "growing" if top["yoy_growth"] > 0 else "declining"
+    # When even the best performer is flat or declining, the more useful
+    # headline subject is the one declining THE MOST (ranked[-1], the most
+    # negative) -- ranked[0] there is only the LEAST negative, and calling
+    # it the one "declining faster than" the true worst performer would
+    # have the comparison backwards.
+    if ranked[0]["yoy_growth"] > 0:
+        top, bottom = ranked[0], ranked[-1]
+    else:
+        top, bottom = ranked[-1], ranked[0]
+    if top["yoy_growth"] == 0:
+        top_direction = "flat"
+    else:
+        top_direction = "growing" if top["yoy_growth"] > 0 else "declining"
     if len(ranked) == 1:
         suffix = "" if top.get("significant") else " (trend not significant)"
         return f"{top['lang'].upper()} interest {top_direction}{suffix}."
-    bottom = ranked[-1]
     suffix = "" if bottom.get("significant") else f"; {bottom['lang'].upper()} trend not significant"
-    return f"{top['lang'].upper()} interest {top_direction} faster than {bottom['lang'].upper()}{suffix}."
+    comparison = "flat, compared to" if top_direction == "flat" else f"{top_direction} faster than"
+    return f"{top['lang'].upper()} interest {comparison} {bottom['lang'].upper()}{suffix}."
 
 
 def run_report(run_id: str, formats=None, summary=None) -> dict:
