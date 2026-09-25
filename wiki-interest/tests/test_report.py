@@ -92,6 +92,8 @@ def _realistic_run_data() -> dict:
                 "yoy_growth": 0.25,
                 "share_yoy_growth": 0.10,
                 "momentum_6mo": 0.15,
+                "avg_monthly_views": 12345,
+                "last12_avg_monthly_views": 13000,
                 "spikes_removed": 1,
                 "seasonal_peaks_kept": 1,
                 "significant": True,
@@ -186,9 +188,12 @@ def test_method_note_contains_bot_wording_and_excludes_forbidden_phrases():
     note = method_note(period)
     lower = note.lower()
 
-    assert "excludes known bots and automated traffic" in note
+    assert "exclude known bots and automated traffic" in note
     assert "humans only" not in lower
     assert "human readers" not in lower
+    assert "regular readers" not in lower
+    assert "real users" not in lower
+    assert "real people" not in lower
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +282,10 @@ def test_render_markdown_wording_checks():
 
     assert "humans only" not in lower
     assert "human readers" not in lower
-    assert "excludes known bots and automated traffic" in md
+    assert "regular readers" not in lower
+    assert "real users" not in lower
+    assert "real people" not in lower
+    assert "exclude known bots and automated traffic" in md
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +314,7 @@ def test_render_pdf_creates_one_page_pdf_with_expected_content(tmp_path):
     assert "en" in normalized
     assert "de" in normalized
     assert "Method & limits" in normalized
-    assert "excludes known bots and automated traffic" in normalized
+    assert "exclude known bots and automated traffic" in normalized
 
 
 def test_render_pdf_wording_checks(tmp_path):
@@ -319,6 +327,9 @@ def test_render_pdf_wording_checks(tmp_path):
 
     assert "humans only" not in normalized_lower
     assert "human readers" not in normalized_lower
+    assert "regular readers" not in normalized_lower
+    assert "real users" not in normalized_lower
+    assert "real people" not in normalized_lower
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +396,10 @@ def test_wording_check_across_all_report_outputs(tmp_path):
     md_lower = md_text.lower()
     assert "humans only" not in md_lower
     assert "human readers" not in md_lower
-    assert "excludes known bots and automated traffic" in md_text
+    assert "regular readers" not in md_lower
+    assert "real users" not in md_lower
+    assert "real people" not in md_lower
+    assert "exclude known bots and automated traffic" in md_text
 
     # PDF: whitespace-normalized text, since textwrap.wrap() may break the
     # required phrase across a line boundary.
@@ -393,7 +407,10 @@ def test_wording_check_across_all_report_outputs(tmp_path):
     pdf_normalized_lower = pdf_normalized.lower()
     assert "humans only" not in pdf_normalized_lower
     assert "human readers" not in pdf_normalized_lower
-    assert "excludes known bots and automated traffic" in pdf_normalized
+    assert "regular readers" not in pdf_normalized_lower
+    assert "real users" not in pdf_normalized_lower
+    assert "real people" not in pdf_normalized_lower
+    assert "exclude known bots and automated traffic" in pdf_normalized
 
 # ---------------------------------------------------------------------------
 # 7. One-page guarantee under load (many-language worst case)
@@ -747,7 +764,7 @@ def test_render_pdf_table_headers_are_founder_friendly_and_drop_title(tmp_path):
     render_pdf(run_data, output_path)
 
     normalized = _normalize(_pdf_text(output_path))
-    for header in ["Language", "Year-over-year", "vs. all Wikipedia traffic", "Last 6 months", "Steady trend?", "Confidence"]:
+    for header in ["Language", "Avg. views/mo", "Year-over-year", "vs. all Wikipedia traffic", "Last 6 months", "Steady trend?", "Confidence"]:
         assert header in normalized
     assert "Title" not in normalized
     # The Title column is dropped from the PDF table specifically (still in
@@ -763,8 +780,77 @@ def test_render_markdown_table_headers_keep_title():
 
     md = render_markdown(run_data)
 
-    assert "| Language | Title | Year-over-year | vs. all Wikipedia traffic | Last 6 months | Steady trend? | Confidence |" in md
+    assert "| Language | Title | Avg. monthly views | Year-over-year | vs. all Wikipedia traffic | Last 6 months | Steady trend? | Confidence |" in md
     assert "| en | Solar eclipse |" in md
+
+
+# ---------------------------------------------------------------------------
+# 13. avg_monthly_views column
+# ---------------------------------------------------------------------------
+
+
+def test_render_markdown_shows_avg_monthly_views_and_n_a_for_missing():
+    run_data = _realistic_run_data()
+
+    md = render_markdown(run_data)
+
+    assert "12,345" in md  # en's avg_monthly_views
+    # de has no avg_monthly_views key at all -- must degrade to "n/a", not KeyError.
+    assert "| de | Sonnenfinsternis | n/a |" in md
+
+
+def test_render_pdf_shows_avg_monthly_views(tmp_path):
+    run_data = _realistic_run_data()
+    output_path = str(tmp_path / "report.pdf")
+
+    render_pdf(run_data, output_path)
+
+    normalized = _normalize(_pdf_text(output_path))
+    assert "12,345" in normalized
+    assert "n/a" in normalized  # de's missing avg_monthly_views
+
+
+def test_render_pdf_table_never_overflows_its_axes_width(tmp_path):
+    """
+    Regression test for a real bug: matplotlib's Table.auto_set_column_width
+    has no awareness of the containing axes' actual width, so adding a
+    column (avg_monthly_views) pushed the outer columns off both edges of
+    the page -- only caught by visually rendering the PDF. A later fix that
+    manually corrected the table's width also silently got undone by
+    matplotlib re-running auto_set_column_width's own sizing on the next
+    draw (Table._update_positions), unless that tracking is cleared too.
+    Assert the invariant directly: after rendering, the table's measured
+    bounding box must fit within its axes' bounding box.
+    """
+    import matplotlib.figure
+    import matplotlib.table
+
+    run_data = _realistic_run_data()
+    output_path = str(tmp_path / "report.pdf")
+
+    captured = {}
+    original_savefig = matplotlib.figure.Figure.savefig
+
+    def spy_savefig(self, *args, **kwargs):
+        renderer = self.canvas.get_renderer()
+        for ax in self.axes:
+            for child in ax.get_children():
+                if isinstance(child, matplotlib.table.Table):
+                    captured["table_bbox"] = child.get_window_extent(renderer)
+                    captured["axes_bbox"] = ax.get_window_extent()
+        return original_savefig(self, *args, **kwargs)
+
+    matplotlib.figure.Figure.savefig = spy_savefig
+    try:
+        render_pdf(run_data, output_path)
+    finally:
+        matplotlib.figure.Figure.savefig = original_savefig
+
+    assert "table_bbox" in captured, "no matplotlib Table found in the rendered figure"
+    # A small tolerance for floating-point rounding in the width correction.
+    assert captured["table_bbox"].width <= captured["axes_bbox"].width + 1.0
+    assert captured["table_bbox"].x0 >= captured["axes_bbox"].x0 - 1.0
+    assert captured["table_bbox"].x1 <= captured["axes_bbox"].x1 + 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -823,7 +909,12 @@ def test_render_pdf_caps_table_rows_for_many_languages(tmp_path):
     render_pdf(run_data, output_path)
 
     normalized = _normalize(_pdf_text(output_path))
-    assert "and 4 more language(s)" in normalized
+    # Exact count depends on how many rows fit at the enforced minimum
+    # readable font size (see report.py's MIN_TABLE_FONTSIZE) -- assert the
+    # capping behavior itself (some rows omitted, pointed to the Markdown
+    # report), not a specific number that would need updating every time
+    # the layout budget shifts slightly.
+    assert re.search(r"and \d+ more language\(s\)", normalized)
     assert "Markdown report" in normalized
 
 
@@ -845,3 +936,178 @@ def test_render_markdown_does_not_cap_table_rows_or_trust_notes_for_many_languag
     for r in run_data["results"]:
         assert f"| {r['lang']} |" in md
         assert report.plain_trust_note(r, run_data["period"]) in md
+
+
+# ---------------------------------------------------------------------------
+# 15. default_summary (multi-language): names top-ranked, weakest, and counts
+# ---------------------------------------------------------------------------
+
+
+def test_default_summary_names_top_ranked_weakest_and_growth_counts():
+    # results is deliberately or NOT in any obvious value order -- "ja" (the
+    # real top-ranked entry, i.e. results[0], matching how cli.py now saves
+    # results in --rank-by order) is neither alphabetically first nor last,
+    # and "hi" (the actual weakest/most-declining) is placed in the MIDDLE
+    # of the list, not first or last by position -- so a naive
+    # "first"/"last-in-list" implementation would name the wrong languages.
+    run_data = {
+        "topic": "Yoga",
+        "results": [
+            {"lang": "ja", "yoy_growth": -0.151, "significant": True},
+            {"lang": "de", "yoy_growth": -0.183, "significant": True},
+            {"lang": "hi", "yoy_growth": -0.601, "significant": True},
+            {"lang": "pl", "yoy_growth": -0.185, "significant": True},
+        ],
+    }
+
+    summary = default_summary(run_data)
+
+    assert summary.startswith('Interest in "Yoga" in ja')  # top-ranked = results[0]
+    assert "HI" in summary  # the weakest (most negative) performer, by value not position
+    assert "-60.1%" in summary
+    assert "4 languages" in summary
+    assert "0 are growing and 4 are declining" in summary
+
+
+def test_default_summary_omits_weakest_when_it_is_the_headline_itself():
+    # If the top-ranked (headline) result is ALSO the weakest one (e.g. a
+    # single sharp decliner with everyone else flat-ish), naming it twice
+    # would be redundant -- the weakest clause should only appear when it's
+    # a DIFFERENT language from the headline.
+    run_data = {
+        "topic": "Topic",
+        "results": [
+            {"lang": "aa", "yoy_growth": -0.9, "significant": True},
+            {"lang": "bb", "yoy_growth": -0.1, "significant": True},
+            {"lang": "cc", "yoy_growth": -0.05, "significant": True},
+        ],
+    }
+
+    summary = default_summary(run_data)
+
+    assert summary.startswith('Interest in "Topic" in aa')
+    assert "shows the weakest trend" not in summary
+    assert "0 are growing and 3 are declining" in summary
+
+
+def test_default_summary_single_language_has_no_counts_sentence():
+    run_data = {"topic": "Topic", "results": [{"lang": "en", "yoy_growth": 0.3, "significant": True}]}
+
+    summary = default_summary(run_data)
+
+    assert "are growing and" not in summary
+    assert "weakest trend" not in summary
+
+
+# ---------------------------------------------------------------------------
+# 16. No overlapping text bounding boxes (header, Trust notes, Method & limits)
+# ---------------------------------------------------------------------------
+
+
+def _rendered_text_bboxes(run_data: dict, tmp_path) -> dict:
+    """
+    Render `run_data` and return {text_content: bbox} for every Text
+    artist matplotlib actually placed, in figure-pixel coordinates,
+    captured via a savefig spy (render_pdf saves-and-closes internally, so
+    this is the only point the Figure is reachable before it's gone).
+    """
+    import matplotlib.figure
+
+    captured = {}
+    original_savefig = matplotlib.figure.Figure.savefig
+
+    def spy_savefig(self, *args, **kwargs):
+        renderer = self.canvas.get_renderer()
+        for ax in self.axes:
+            for text_artist in ax.texts:
+                content = text_artist.get_text()
+                if content.strip():
+                    captured[content] = text_artist.get_window_extent(renderer)
+        return original_savefig(self, *args, **kwargs)
+
+    matplotlib.figure.Figure.savefig = spy_savefig
+    try:
+        render_pdf(run_data, str(tmp_path / "report.pdf"))
+    finally:
+        matplotlib.figure.Figure.savefig = original_savefig
+    return captured
+
+
+def _find_bbox(bboxes: dict, prefix: str):
+    for content, bbox in bboxes.items():
+        if content.startswith(prefix):
+            return content, bbox
+    raise AssertionError(f"no rendered text starts with {prefix!r} -- have: {list(bboxes)}")
+
+
+def _assert_no_vertical_overlap(bboxes: dict, prefix_a: str, prefix_b: str):
+    """
+    Two text blocks overlap if the lower one's TOP edge is above the
+    higher one's BOTTOM edge -- bbox.y0/y1 are in figure-pixel coordinates
+    with y increasing UPWARD (matplotlib convention), so "A above B, not
+    overlapping" means A's bottom (y0) is at or above B's top (y1).
+    """
+    content_a, bbox_a = _find_bbox(bboxes, prefix_a)
+    content_b, bbox_b = _find_bbox(bboxes, prefix_b)
+    top, bottom = (bbox_a, bbox_b) if bbox_a.y0 >= bbox_b.y0 else (bbox_b, bbox_a)
+    assert top.y0 >= bottom.y1, f"{content_a[:40]!r} and {content_b[:40]!r} vertically overlap: {bbox_a} vs {bbox_b}"
+
+
+def _series_n(start: str, n: int, value) -> dict:
+    year, month = (int(p) for p in start.split("-"))
+    out = {}
+    for _ in range(n):
+        out[f"{year:04d}-{month:02d}"] = value
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return out
+
+
+def _overlap_check_run_data(n_langs: int) -> dict:
+    langs = [f"lang{i:02d}" for i in range(n_langs)]
+    return {
+        "run_id": "overlap-check",
+        "topic": "Overlap Check Topic",
+        "period": _basic_period(start="2024-09", end="2026-08", reference_months_before=12, actual_history_months=36, target_history_months=36),
+        "series": {lang: _series_n("2024-09", 24, 100 * (i + 1)) for i, lang in enumerate(langs)},
+        "results": [
+            {
+                "lang": lang,
+                "title": f"Title {lang}",
+                "yoy_growth": 0.1 * (i + 1) * (-1 if i % 2 else 1),
+                "share_yoy_growth": 0.05,
+                "momentum_6mo": 0.02,
+                "avg_monthly_views": 100 * (i + 1),
+                "last12_avg_monthly_views": 90 * (i + 1),
+                "spikes_removed": 0,
+                "seasonal_peaks_kept": 0,
+                "significant": i % 2 == 0,
+                "confidence": "medium",
+                "reason": f"Reason text for {lang}.",
+            }
+            for i, lang in enumerate(langs)
+        ],
+        "missing": [],
+    }
+
+
+@pytest.mark.parametrize("n_langs", [1, 2, 12])
+def test_no_overlapping_headings_or_body_text_across_layouts(tmp_path, n_langs):
+    run_data = _overlap_check_run_data(n_langs)
+
+    bboxes = _rendered_text_bboxes(run_data, tmp_path)
+
+    # Header: title vs. the "Period: ..." line under it.
+    _assert_no_vertical_overlap(bboxes, "Wiki interest report:", "Period:")
+    # Trust notes: the bold heading vs. its own body paragraph.
+    _assert_no_vertical_overlap(bboxes, "Trust notes", "lang00:")
+    # Method & limits: the bold heading vs. its own body paragraph.
+    _assert_no_vertical_overlap(bboxes, "Method & limits", "Charts and tables")
+    # Cross-section: the trust-notes body must not bleed down into the
+    # Method & limits heading below it.
+    _, trust_heading_bbox = _find_bbox(bboxes, "Trust notes")
+    _, trust_body_bbox = _find_bbox(bboxes, "lang00:")
+    assert trust_body_bbox.y1 <= trust_heading_bbox.y0, "trust-notes body starts at or above its own heading"
+    _assert_no_vertical_overlap(bboxes, "lang00:", "Method & limits")

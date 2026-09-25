@@ -26,6 +26,7 @@ def build_trend_chart(
     spikes_by_lang: dict = None,
     seasonal_by_lang: dict = None,
     legend_ax=None,
+    omitted_lang_count: int = 0,
 ):
     """
     Line chart of monthly views per language, restricted to
@@ -33,13 +34,24 @@ def build_trend_chart(
     passed in here (charts cover only the requested period, notes/plan.md).
 
     `series_by_lang`: {lang: {"month": views, ...}} (api_client/metrics'
-    zero-filled monthly series shape, already spike-free if desired).
+    zero-filled monthly series shape, already spike-free if desired). The
+    CALLER is responsible for deciding how many languages to plot at all
+    (e.g. report.py plots only the top 5 by rank, since more than a
+    handful of overlapping lines stops being readable) -- this function
+    just draws whatever it's given.
 
     `spikes_by_lang`/`seasonal_by_lang` (optional): {lang: set/list of
     "YYYY-MM"} from metrics.classify_spikes_and_seasonal -- if given, those
     months are marked on the line (x = one-off spike, o = recurring
     seasonal peak) so a reader can see which bumps were excluded from the
     growth numbers and which were kept as real seasonal pattern.
+
+    `omitted_lang_count` (optional): how many languages the caller left out
+    of `series_by_lang` entirely (e.g. ranked below the top 5 shown) -- if
+    >0, adds a "(+N more not shown)" legend entry so the chart makes clear
+    it isn't the full picture, distinct from max_language_entries below
+    (which caps the LEGEND for a chart that's already plotting many lines,
+    not how many lines get plotted in the first place).
 
     Draws onto `ax` if given (e.g. a subplot in a larger PDF page), else
     creates its own standalone Figure. Either way, returns the Figure.
@@ -101,6 +113,9 @@ def build_trend_chart(
             omitted = len(labels) - max_language_entries
             handles = handles[:max_language_entries] + [plt.Line2D([0], [0], color="none")]
             labels = labels[:max_language_entries] + [f"(+{omitted} more not shown in legend)"]
+        if omitted_lang_count > 0:
+            handles.append(plt.Line2D([0], [0], color="none"))
+            labels.append(f"(+{omitted_lang_count} more not shown)")
         for marker_label, (marker, color) in marker_handles.items():
             handles.append(plt.Line2D([0], [0], marker=marker, color="none", markeredgecolor=color, markerfacecolor="none" if marker == "o" else color, markersize=6))
             labels.append(marker_label)
