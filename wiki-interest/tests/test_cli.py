@@ -189,9 +189,11 @@ def test_run_id_is_server_generated_and_matches_the_saved_run(requests_mock, ses
 
 
 def test_cli_rejects_caller_supplied_run_id_on_analyze():
+    # cli._RaisingArgumentParser turns argparse's own SystemExit into a
+    # normal exception -- see test_rank_by_invalid_choice_raises_value_error.
     parser = cli.build_parser()
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         parser.parse_args(["analyze", "--topic", "Topic", "--langs", "de", "--run-id", "caller-chosen-id"])
 
 
@@ -447,6 +449,36 @@ def test_main_prints_single_json_error_line_on_missing_run_id(capsys):
     assert "Traceback" not in captured.err
 
 
+def test_main_prints_single_json_error_line_on_bad_argument_not_argparse_usage_text(capsys):
+    # An argparse-level failure (invalid choice) must get the same
+    # single-JSON-line-on-stdout, exit-1 treatment as any other error --
+    # not argparse's own usage message on stderr + SystemExit(2).
+    exit_code = cli.main(["analyze", "--topic", "Topic", "--langs", "de", "--rank-by", "bogus"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    stdout_lines = [line for line in captured.out.split("\n") if line]
+    assert len(stdout_lines) == 1
+    payload = json.loads(stdout_lines[0])
+    assert isinstance(payload["error"], str) and payload["error"]
+    assert isinstance(payload["hint"], str) and payload["hint"]
+    assert captured.err == ""
+    assert "usage:" not in captured.out.lower()
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_main_help_still_exits_zero_and_prints_help_text(capsys):
+    # --help must keep its normal argparse behavior (help text + exit 0),
+    # unlike a genuine argument ERROR -- only error() is overridden.
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["--help"])
+
+    assert exc_info.value.code == 0
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out.lower()
+
+
 # ---------------------------------------------------------------------------
 # 11. --source-lang (default "en")
 # ---------------------------------------------------------------------------
@@ -484,10 +516,14 @@ def test_run_resolve_source_lang_queries_that_wikipedia_not_english(requests_moc
 # ---------------------------------------------------------------------------
 
 
-def test_rank_by_invalid_choice_raises_system_exit():
+def test_rank_by_invalid_choice_raises_value_error():
+    # build_parser() uses a raising ArgumentParser (see cli._RaisingArgumentParser)
+    # so an argument error becomes a normal exception main() can turn into
+    # the same {"error", "hint"} JSON line as any other failure, rather
+    # than argparse's own SystemExit + usage-message-on-stderr.
     parser = cli.build_parser()
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(ValueError):
         parser.parse_args(["analyze", "--topic", "Topic", "--langs", "de", "--rank-by", "bogus"])
 
 

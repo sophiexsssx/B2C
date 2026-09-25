@@ -25,6 +25,7 @@ silently under-counted.
 import argparse
 import json
 import os
+import re
 import sys
 
 import requests
@@ -84,14 +85,35 @@ def _month_range(start: str, end: str) -> list:
     return months
 
 
+_YYYYMM_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def _validate_yyyymm(label: str, value: str) -> None:
+    """
+    Raise ValueError unless `value` is a canonical "YYYY-MM" string (4-digit
+    year, zero-padded 2-digit month 01-12). Every ordering comparison in
+    this module (start > end, the start <= m <= end filters used throughout
+    run_analyze) is a plain string comparison that only agrees with
+    chronological order for this exact canonical form -- e.g. the
+    non-canonical "2024-9" sorts AFTER "2024-10" lexicographically ('9' >
+    '1'), which would silently corrupt every downstream comparison without
+    this check catching it first.
+    """
+    if not _YYYYMM_RE.match(value):
+        raise ValueError(f'{label} ({value!r}) must be a canonical "YYYY-MM" value (4-digit year, 2-digit month 01-12)')
+
+
 def _validate_and_normalize_period(start: str, end: str, today=None) -> tuple:
     """
-    (start, end, note): raises ValueError for start > end. If `end` is the
-    current or a future month, clamps it to the last complete month instead
-    of silently mixing a partial in-progress count into every growth
-    calculation -- `note` explains the clamp so the agent isn't surprised
-    the returned period differs from what it asked for; None if untouched.
+    (start, end, note): raises ValueError for a non-canonical start/end or
+    for start > end. If `end` is the current or a future month, clamps it
+    to the last complete month instead of silently mixing a partial
+    in-progress count into every growth calculation -- `note` explains the
+    clamp so the agent isn't surprised the returned period differs from
+    what it asked for; None if untouched.
     """
+    _validate_yyyymm("--start", start)
+    _validate_yyyymm("--end", end)
     if start > end:
         raise ValueError(f"--start ({start}) must not be after --end ({end})")
     last_complete = metrics.last_complete_month(today)
@@ -203,14 +225,29 @@ def _topic_monthly(session, lang, title, start, end, agent, redirect_titles, tod
 # ---------------------------------------------------------------------------
 
 
+def _strip_matching_outer_quotes(text: str) -> str:
+    """
+    'Przerywany post' -> unchanged; '"Przerywany post"' -> 'Przerywany post'.
+    The --article help text shows the lang:"Title" form with literal
+    quotes -- a caller building argv programmatically (this CLI's target
+    user is an agent, not someone typing at a shell that would normally
+    strip those quotes itself) can end up passing them through as literal
+    characters. Only a genuine matching OUTER pair is removed; a lone or
+    unmatched quote, or quotes elsewhere in the title, are left as-is.
+    """
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        return text[1:-1]
+    return text
+
+
 def _parse_article_overrides(article_args) -> dict:
-    """["pl:Przerywany post", ...] -> {"pl": "Przerywany post", ...}."""
+    """["pl:Przerywany post", 'pl:"Przerywany post"', ...] -> {"pl": "Przerywany post", ...}."""
     overrides = {}
     for raw in article_args or []:
         if ":" not in raw:
             raise ValueError(f"--article must be lang:\"Title\", got {raw!r}")
         lang, title = raw.split(":", 1)
-        overrides[lang.strip()] = title.strip()
+        overrides[lang.strip()] = _strip_matching_outer_quotes(title.strip())
     return overrides
 
 
@@ -220,25 +257,36 @@ def _json_bytes(obj) -> int:
 
 def _cap_response(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict:
     """
-    Trim `ranked` (then, only if that alone still isn't enough, `unranked`)
-    from the low-priority end until the response fits `byte_limit` --
-    notes/plan.md: report the top N plus how many were omitted, never
-    silently truncate JSON mid-object.
+    Trim `ranked`, then (only if that alone still isn't enough) `unranked`,
+    then (only if THAT still isn't enough -- e.g. a huge `missing` list on
+    its own pushes the response over budget) `missing`, from each one's
+    low-priority end until the response fits `byte_limit` -- notes/plan.md:
+    report the top N plus how many were omitted, never silently truncate
+    JSON mid-object or return something over budget.
     """
     if _json_bytes(response) <= byte_limit:
         return response
     response = dict(response)
     ranked = list(response["ranked"])
     unranked = list(response["unranked"])
+    missing = list(response.get("missing", []))
     omitted = 0
-    while _json_bytes({**response, "ranked": ranked, "unranked": unranked, "omitted": omitted}) > byte_limit and ranked:
+
+    def _still_over_budget() -> bool:
+        return _json_bytes({**response, "ranked": ranked, "unranked": unranked, "missing": missing, "omitted": omitted}) > byte_limit
+
+    while _still_over_budget() and ranked:
         ranked.pop()
         omitted += 1
-    while _json_bytes({**response, "ranked": ranked, "unranked": unranked, "omitted": omitted}) > byte_limit and unranked:
+    while _still_over_budget() and unranked:
         unranked.pop()
+        omitted += 1
+    while _still_over_budget() and missing:
+        missing.pop()
         omitted += 1
     response["ranked"] = ranked
     response["unranked"] = unranked
+    response["missing"] = missing
     response["omitted"] = omitted
     return response
 
@@ -252,8 +300,13 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
     """
     session = session or api_client.build_session()
     source_project = f"{source_lang}.wikipedia"
-    if start is None or end is None:
+    if start is None and end is None:
         start, end = metrics.default_period(today)
+    elif start is None or end is None:
+        # A partial pair is ambiguous, not a request for the default range --
+        # silently replacing BOTH with the default would discard whichever
+        # one the caller DID specify without any indication that happened.
+        raise ValueError("--start and --end must both be given, or both omitted (to use the default 24-month period)")
     start, end, period_note = _validate_and_normalize_period(start, end, today)
     overrides = article_overrides or {}
     period = _compute_period(start, end)
@@ -452,8 +505,28 @@ def _split_langs(value: str) -> list:
     return [lang.strip() for lang in value.split(",") if lang.strip()]
 
 
+class _RaisingArgumentParser(argparse.ArgumentParser):
+    """
+    argparse's default error() prints a usage message to stderr and calls
+    sys.exit(2) -- SystemExit, which doesn't inherit from Exception, so it
+    passes straight through main()'s `except Exception` untouched instead of
+    becoming the single {"error", "hint"} JSON line on stdout every other
+    failure mode (network, validation, ...) produces. A bad --rank-by or a
+    missing required --topic should get that same treatment, since this
+    CLI's caller is an agent parsing JSON, not a human reading a usage
+    string. Only error() is overridden -- -h/--help goes through exit(),
+    which is untouched, so --help still prints help text and exits 0
+    normally.
+    """
+
+    def error(self, message):
+        raise ValueError(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="wiki-interest", description="Wikipedia cross-language interest analysis.")
+    # add_subparsers() defaults each subparser to type(self), so analyze/
+    # report/resolve automatically raise the same way as the top-level parser.
+    parser = _RaisingArgumentParser(prog="wiki-interest", description="Wikipedia cross-language interest analysis.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     analyze = sub.add_parser("analyze", help="Resolve, fetch, and compute metrics for a topic across languages.")
@@ -508,9 +581,9 @@ def _error_hint(exc: Exception) -> str:
 
 def main(argv=None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
 
     try:
+        args = parser.parse_args(argv)
         if args.command == "analyze":
             overrides = _parse_article_overrides(args.article)
             result = run_analyze(
