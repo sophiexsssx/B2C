@@ -54,6 +54,26 @@ BOT_WORDING = "exclude known bots and automated traffic"
 MAX_CHART_LANGS = 5
 
 
+def _chart_series_and_omitted(results: list, series: dict) -> tuple:
+    """
+    (chart_series, omitted_count) for the trend chart -- the top
+    MAX_CHART_LANGS *chartable* results by rank (results is already in
+    rank order, see cli.py's run_analyze), where "chartable" means it
+    actually has an entry in `series`. A "no_data" result (main article
+    404, see cli.py) has no series entry at all, so without this filter it
+    could occupy one of the MAX_CHART_LANGS slots while drawing no line at
+    all, and would inflate the omitted count even though nothing about it
+    was actually left off the chart for space reasons. Filtering first
+    preserves rank order (filtering a list never reorders it), so this is
+    still genuinely the top N, not an arbitrary slice.
+    """
+    chartable_results = [r for r in results if r["lang"] in series]
+    chart_langs = [r["lang"] for r in chartable_results[:MAX_CHART_LANGS]]
+    chart_series = {lang: monthly for lang, monthly in series.items() if lang in chart_langs}
+    omitted_count = max(0, len(chartable_results) - MAX_CHART_LANGS)
+    return chart_series, omitted_count
+
+
 def method_note(period: dict) -> str:
     """
     The method & limits paragraph -- reference-window disclosure, matching
@@ -573,13 +593,10 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     # -- trend chart (drawn directly onto this page's subplot, not copied
     # from a standalone figure -- see charts.py's ax= parameter), with its
     # legend on its own dedicated row right after it (see build_trend_chart's
-    # legend_ax docstring for why) -- capped to the top MAX_CHART_LANGS by
-    # rank, since more than a handful of overlapping lines stops being
-    # readable; results is already in rank order (see cli.py's run_analyze),
-    # so results[:MAX_CHART_LANGS] is genuinely the top N, not an arbitrary slice.
-    chart_langs = [r["lang"] for r in results[:MAX_CHART_LANGS]]
-    chart_series = {lang: monthly for lang, monthly in series.items() if lang in chart_langs}
-    omitted_chart_langs = max(0, len(results) - MAX_CHART_LANGS)
+    # legend_ax docstring for why) -- capped to the top MAX_CHART_LANGS
+    # chartable results by rank, since more than a handful of overlapping
+    # lines stops being readable (see _chart_series_and_omitted).
+    chart_series, omitted_chart_langs = _chart_series_and_omitted(results, series)
     ax_trend = fig.add_subplot(grid[next(row)])
     ax_trend_legend = fig.add_subplot(grid[next(row)])
     charts.build_trend_chart(
@@ -664,12 +681,10 @@ def build_report(run_data: dict, output_dir: str) -> dict:
     series = run_data.get("series", {})
     results = run_data.get("results", [])
 
-    # Same top-MAX_CHART_LANGS-by-rank cap as render_pdf's embedded chart --
-    # this standalone chart.png should show the same picture, not a
-    # different, uncapped one.
-    chart_langs = [r["lang"] for r in results[:MAX_CHART_LANGS]]
-    chart_series = {lang: monthly for lang, monthly in series.items() if lang in chart_langs}
-    omitted_chart_langs = max(0, len(results) - MAX_CHART_LANGS)
+    # Same top-MAX_CHART_LANGS-chartable-by-rank cap as render_pdf's
+    # embedded chart (see _chart_series_and_omitted) -- this standalone
+    # chart.png should show the same picture, not a different, uncapped one.
+    chart_series, omitted_chart_langs = _chart_series_and_omitted(results, series)
 
     trend_fig = charts.build_trend_chart(
         chart_series,

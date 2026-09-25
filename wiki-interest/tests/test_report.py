@@ -1111,3 +1111,96 @@ def test_no_overlapping_headings_or_body_text_across_layouts(tmp_path, n_langs):
     _, trust_body_bbox = _find_bbox(bboxes, "lang00:")
     assert trust_body_bbox.y1 <= trust_heading_bbox.y0, "trust-notes body starts at or above its own heading"
     _assert_no_vertical_overlap(bboxes, "lang00:", "Method & limits")
+
+
+# ---------------------------------------------------------------------------
+# 17. Chart selection skips no_data (unchartable) results, doesn't waste a slot
+# ---------------------------------------------------------------------------
+
+
+def test_chart_series_and_omitted_skips_results_with_no_series_entry():
+    # 4 chartable + 1 unchartable ("nd", a no_data result with no entry in
+    # series at all) -- both within MAX_CHART_LANGS's overall span. The
+    # unchartable one must not occupy a chart slot or count as omitted:
+    # all 4 real languages should be plotted, none omitted.
+    results = [
+        {"lang": "aa", "yoy_growth": 0.5},
+        {"lang": "bb", "yoy_growth": 0.4},
+        {"lang": "nd", "yoy_growth": None},  # no_data -- not in series
+        {"lang": "cc", "yoy_growth": 0.3},
+        {"lang": "dd", "yoy_growth": 0.2},
+    ]
+    series = {"aa": {"2024-01": 1}, "bb": {"2024-01": 1}, "cc": {"2024-01": 1}, "dd": {"2024-01": 1}}
+
+    chart_series, omitted = report._chart_series_and_omitted(results, series)
+
+    assert set(chart_series) == {"aa", "bb", "cc", "dd"}
+    assert omitted == 0
+
+
+def test_chart_series_and_omitted_counts_only_chartable_results_as_omitted():
+    # 7 chartable results (2 more than MAX_CHART_LANGS=5) plus 1
+    # unchartable no_data result -- omitted must be 2 (7-5), not 3
+    # (8-5), since the no_data one was never eligible for a slot at all.
+    results = [{"lang": f"lang{i:02d}", "yoy_growth": 1.0 - i * 0.1} for i in range(7)]
+    results.append({"lang": "nd", "yoy_growth": None})
+    series = {r["lang"]: {"2024-01": 1} for r in results if r["lang"] != "nd"}
+
+    chart_series, omitted = report._chart_series_and_omitted(results, series)
+
+    assert len(chart_series) == 5
+    assert omitted == 2
+    assert set(chart_series) == {f"lang{i:02d}" for i in range(5)}  # top 5 by rank order, preserved
+
+
+def test_chart_series_and_omitted_preserves_rank_order_when_filtering():
+    # The best-ranked result ("best") is unchartable; rank order among the
+    # remaining chartable ones must still be preserved (not re-sorted).
+    results = [
+        {"lang": "best", "yoy_growth": 0.9},  # no_data -- not in series
+        {"lang": "second", "yoy_growth": 0.5},
+        {"lang": "third", "yoy_growth": 0.1},
+    ]
+    series = {"second": {"2024-01": 1}, "third": {"2024-01": 1}}
+
+    chart_series, omitted = report._chart_series_and_omitted(results, series)
+
+    assert set(chart_series) == {"second", "third"}
+    assert omitted == 0
+
+
+def test_render_pdf_and_build_report_do_not_let_no_data_result_waste_a_chart_slot(tmp_path):
+    langs = [f"lang{i:02d}" for i in range(6)]
+    run_data = {
+        "run_id": "no-data-chart-test",
+        "topic": "Topic",
+        "period": _basic_period(),
+        "series": {lang: _series("2023-01", 12, 100) for lang in langs if lang != "lang02"},
+        "results": [
+            {
+                "lang": lang,
+                "title": f"Title {lang}",
+                "yoy_growth": None if lang == "lang02" else 0.5 - i * 0.05,
+                "yoy_growth_flag": "no_data" if lang == "lang02" else None,
+                "share_yoy_growth": 0.05,
+                "momentum_6mo": 0.02,
+                "spikes_removed": 0,
+                "seasonal_peaks_kept": 0,
+                "significant": True,
+                "confidence": "low" if lang == "lang02" else "medium",
+                "reason": "no pageview data returned" if lang == "lang02" else f"Reason for {lang}.",
+            }
+            for i, lang in enumerate(langs)
+        ],
+        "missing": [],
+    }
+
+    # lang02 (no_data) is NOT in series, so all 5 OTHER languages are
+    # chartable and exactly fill MAX_CHART_LANGS -- omitted must be 0, not 1.
+    render_pdf(run_data, str(tmp_path / "report.pdf"))
+    normalized = _normalize(_pdf_text(str(tmp_path / "report.pdf")))
+    assert "not shown" not in normalized
+
+    paths = build_report(run_data, str(tmp_path / "out"))
+    with open(paths["png"], "rb") as f:
+        assert f.read(8).startswith(b"\x89PNG")
