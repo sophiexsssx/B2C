@@ -540,6 +540,14 @@ def test_validate_and_normalize_period_raises_when_start_after_end():
         cli._validate_and_normalize_period("2024-06", "2024-01")
 
 
+def test_validate_yyyymm_rejects_trailing_newline():
+    # Python's $ (unlike \Z) matches just before a trailing newline, so
+    # "2024-01\n" would otherwise slip past validation and then compare as
+    # a different, wrong string everywhere start/end are used.
+    with pytest.raises(ValueError):
+        cli._validate_yyyymm("--start", "2024-01\n")
+
+
 def test_run_analyze_raises_value_error_when_start_after_end(session):
     # No network mocking needed -- validation happens before any fetch.
     with pytest.raises(ValueError):

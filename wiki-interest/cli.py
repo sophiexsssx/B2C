@@ -85,7 +85,7 @@ def _month_range(start: str, end: str) -> list:
     return months
 
 
-_YYYYMM_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_YYYYMM_RE = re.compile(r"\A[0-9]{4}-(0[1-9]|1[0-2])\Z")
 
 
 def _validate_yyyymm(label: str, value: str) -> None:
@@ -97,7 +97,10 @@ def _validate_yyyymm(label: str, value: str) -> None:
     chronological order for this exact canonical form -- e.g. the
     non-canonical "2024-9" sorts AFTER "2024-10" lexicographically ('9' >
     '1'), which would silently corrupt every downstream comparison without
-    this check catching it first.
+    this check catching it first. Anchored with \\A/\\Z (not ^/$, which in
+    Python matches just before a trailing newline too -- "2024-01\\n" would
+    otherwise slip through) and [0-9] (not \\d, which also accepts non-ASCII
+    decimal digits) to actually enforce "exactly this and nothing else".
     """
     if not _YYYYMM_RE.match(value):
         raise ValueError(f'{label} ({value!r}) must be a canonical "YYYY-MM" value (4-digit year, 2-digit month 01-12)')
