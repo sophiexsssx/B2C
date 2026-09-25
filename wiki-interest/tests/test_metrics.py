@@ -27,6 +27,7 @@ from wiki_interest.metrics import (
     last_complete_month,
     mann_kendall_test,
     rank_series,
+    spike_free_series,
 )
 
 
@@ -143,6 +144,59 @@ def test_detect_elevated_months_uses_local_not_global_baseline():
     assert "2023-09" in elevated
     assert "2024-09" in elevated
     assert "2025-09" in elevated
+
+
+# ---------------------------------------------------------------------------
+# 1b. spike_free_series
+# ---------------------------------------------------------------------------
+
+
+def test_spike_free_series_winsorizes_to_the_local_not_global_median():
+    # 12 months: a "low" first half (100) and a "high" second half (900),
+    # with a spike planted in the LOW half. The correct winsorized value is
+    # whatever's typical in the spike's own local neighborhood (~100) --
+    # NOT one median over the whole series, which here is 500 (the
+    # low/high midpoint) or, with the spike counted in, 900 (the value at
+    # the sorted list's middle) -- either way, nowhere near the ~100 a
+    # local rolling window correctly produces. This is the same
+    # local-vs-global distinction detect_elevated_months's own docstring
+    # explains for *detecting* a spike; this guards it for *replacing* one.
+    monthly = _series("2020-01", 6, 100)
+    monthly.update(_series("2020-07", 6, 900))
+    monthly["2020-03"] = 5000  # the spike, in the low half
+
+    result = spike_free_series(monthly, {"2020-03"})
+
+    assert result["2020-03"] == 100
+    # Every other month is untouched.
+    for month, views in monthly.items():
+        if month != "2020-03":
+            assert result[month] == views
+
+
+def test_spike_free_series_no_spikes_returns_series_unchanged():
+    monthly = _series("2020-01", 12, 100)
+
+    result = spike_free_series(monthly, set())
+
+    assert result == monthly
+    assert result is not monthly  # a copy, not the same object
+
+
+def test_spike_free_series_multiple_spikes_each_use_their_own_local_window():
+    # Two spikes far apart in a series whose baseline itself trends --
+    # each must be replaced using ITS OWN local neighborhood, not a shared
+    # whole-series figure (which would give both spikes the same
+    # replacement value regardless of where they actually sit).
+    monthly = _series("2020-01", 6, 100)
+    monthly.update(_series("2020-07", 6, 900))
+    monthly["2020-02"] = 5000
+    monthly["2020-10"] = 5000
+
+    result = spike_free_series(monthly, {"2020-02", "2020-10"})
+
+    assert result["2020-02"] == 100
+    assert result["2020-10"] == 900
 
 
 # ---------------------------------------------------------------------------
