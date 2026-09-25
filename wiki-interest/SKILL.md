@@ -12,17 +12,20 @@ from real Wikimedia pageview data -- never estimate or fabricate one.
 ## Setup (once per environment)
 
 Run from this skill's own directory (`cd` into it first, or use its full
-path): `pip install -r requirements.txt`. No other setup is required --
-`WIKITREND_CONTACT` (a contact URL/email for Wikimedia's User-Agent policy)
-is optional; the CLI already sends a working default. Set it only if you
-want requests attributed to a different contact than this project's own repo.
+path): `pip3 install -r requirements.txt` (if `pip3` is not found, try
+`pip`). No other setup is required -- `WIKITREND_CONTACT` (a contact
+URL/email for Wikimedia's User-Agent policy) is optional; the CLI already
+sends a working default. Set it only if you want requests attributed to a
+different contact than this project's own repo.
 
 ## A basic answer is 2 `cli.py` calls
 
 ```bash
-python cli.py analyze --topic "<title>" --langs <lang1>,<lang2>,...
-python cli.py report --run-id <run_id from analyze>
+python3 cli.py analyze --topic "<title>" --langs <lang1>,<lang2>,...
+python3 cli.py report --run-id <run_id from analyze>
 ```
+
+(If `python3` is not found, try `python`.)
 
 `analyze` resolves each language's article, fetches pageviews, computes
 growth/significance/confidence, and returns a compact JSON summary.
@@ -33,6 +36,12 @@ Markdown -- it never re-fetches, so it's fast, and safe to call again later
 match before committing to a full `analyze`; `analyze` already resolves
 internally and reuses the same on-disk cache across calls, so adding a
 language or re-running with new ones doesn't re-fetch what's already there.
+
+You don't need to open the generated report files -- the `analyze` and
+`report` JSON responses already contain everything for your answer (the
+numbers from `analyze`, the file paths from `report`). Just give the user
+the file paths `report` returns; opening the PDF/PNG/Markdown yourself only
+costs extra calls without adding information you don't already have.
 
 ## Turning a request into an `analyze` call
 
