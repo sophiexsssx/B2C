@@ -1,0 +1,112 @@
+{
+  "skill_name": "wiki-interest",
+  "evals": [
+    {
+      "id": 1,
+      "name": "intermittent-fasting-pl-cs",
+      "prompt": "Порівняй зростання інтересу до інтервального голодування в польськомовній та чеськомовній Wikipedia за останні два роки.",
+      "notes": "Assignment example prompt 1. In practice the Wikidata item for 'Intermittent fasting' has no Polish sitelink right now (verified live), so 'pl' may legitimately come back in `missing` -- that's a correct, expected result here, not a failure.",
+      "expect": [
+        "Resolves the request to an analyze call with --topic identifying intermittent fasting and --langs covering pl and cs (English --topic with default --source-lang en, or an equivalent that resolves correctly)",
+        "Does not pass --start/--end (the default 24-month period already matches 'last two years')",
+        "Calls analyze then report -- exactly 2 cli.py calls for this basic question, no more",
+        "If 'pl' comes back in the analyze response's missing list, the final answer says so explicitly instead of silently only discussing cs",
+        "If 'pl' is missing, the answer notes the article may exist under a different Polish title and offers to retry with --article pl:\"...\" (a specific next step, not just 'not found')",
+        "Final answer states cs's (and pl's, if found) year-over-year growth direction, whether it's statistically significant, and the confidence level with a plain-language reason -- not just a bare percentage",
+        "Final answer mentions where the PDF/report files are, or otherwise makes clear a shareable report was produced",
+        "Final answer is written in Ukrainian (the language the user asked in), not English"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "astronomy-course-uk-trust",
+      "prompt": "Ми думаємо додати курс з астрономії до освітнього застосунку. Чи зростає інтерес до цієї теми в україномовній Wikipedia, і наскільки цьому зростанню можна довіряти?",
+      "notes": "Assignment example prompt 2. The user explicitly asks about TRUST, not just growth -- the final answer must address confidence directly, not just report a number.",
+      "expect": [
+        "Calls analyze with --topic identifying astronomy and --langs uk",
+        "Calls report after analyze -- exactly 2 cli.py calls total for this single-language question",
+        "Final answer states clearly whether interest is growing or declining (not just 'here is the number')",
+        "Final answer explicitly addresses how much the growth can be trusted -- mentions confidence level (high/medium/low) AND the underlying reason (e.g. trend significance, history length), in plain language rather than quoting raw field names",
+        "Does not overstate certainty if significant is false -- if the trend isn't statistically significant, the answer says so plainly rather than presenting it as a confident finding",
+        "Final answer is written in Ukrainian (the language the user asked in), not English"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "english-learning-cross-language-recommendation",
+      "prompt": "Ми створюємо застосунок для вивчення мов. Порівняй інтерес до вивчення англійської у вибраних нами мовних розділах та підготуй короткий звіт: які аудиторії варто дослідити наступними й чому?",
+      "notes": "Assignment example prompt 3. The prompt does NOT name which language editions ('вибраних нами' = 'our chosen ones') -- this is a deliberate ambiguity to check the skill handles an underspecified request sensibly, and it asks for a SYNTHESIZED recommendation, not just raw numbers.",
+      "expect": [
+        "Recognizes --langs isn't actually specified by the user, and BEFORE running analyze either asks a clarifying question or states up front which languages it's about to use and why -- not a choice only revealed after the fact inside the final answer",
+        "If it proceeds, calls analyze then report for whatever language set it settled on",
+        "Final answer goes beyond reporting raw growth numbers: it recommends which audience(s)/language(s) are worth investigating next, with a stated reason drawn from the data (e.g. highlighting a significant grower, or an emerging/new_or_dormant language with no baseline yet as worth a closer look)",
+        "Does not present the recommendation as more certain than the underlying confidence levels support",
+        "Final answer is written in Ukrainian (the language the user asked in), not English"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "missing-article-content-gap",
+      "prompt": "How is interest in \"Quantum entanglement kitchen appliances\" trending on the German and Japanese Wikipedia?",
+      "notes": "A deliberately nonexistent/fabricated topic -- should resolve into `missing` for the requested language(s), not crash or produce a fabricated growth number.",
+      "expect": [
+        "Calls analyze with a topic derived from the request and --langs covering de and ja",
+        "Does not crash, retry indefinitely, or fabricate a growth figure when the topic isn't found",
+        "Final answer states plainly that no matching article was found for the requested language(s) (a content gap, not an error) rather than presenting empty/null results as if they were real data",
+        "Does not claim a percentage growth for a language that came back in missing"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "low-volume-emerging-topic",
+      "prompt": "Is there growing interest in \"Ferrofluid art\" on English Wikipedia? We're considering a niche content vertical around it.",
+      "notes": "A real but low-traffic/niche topic, plausibly with little or no prior-period activity -- exercises the zero/insufficient-data path (new_or_dormant, flat, or no_data, whichever the live data actually produces), not the missing-article path.",
+      "expect": [
+        "Calls analyze with --topic for the niche topic and --langs en",
+        "If yoy_growth comes back null (flag new_or_dormant, flat, or no_data), the final answer explains this in plain language (e.g. 'not enough activity/history yet to measure a trend') instead of reporting null, a fabricated percentage, or silently omitting the language",
+        "Does not claim a reliable growth trend when confidence is low due to an insufficient, zero, or missing baseline",
+        "If the topic does show enough history for a real number, reports it with confidence/significance same as any other result"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "short-period-under-24-months",
+      "prompt": "Compare interest in \"Electric bicycle\" between German and Dutch Wikipedia specifically for the last 6 months.",
+      "notes": "Forces --start/--end spanning under 24 months, exercising the reference-baseline-borrowing path.",
+      "expect": [
+        "Calls analyze with explicit --start/--end spanning roughly the last 6 months (both flags given together, never just one)",
+        "Calls report after analyze",
+        "Final answer notes the limitation that, because the requested window is short, the year-over-year comparison's baseline was borrowed from additional history outside the displayed period, rather than presenting the YoY figure as if it came entirely from the requested 6 months",
+        "Does not fabricate a start/end date pair that doesn't reflect '6 months' just to avoid the reference-baseline case"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "many-languages-output-cap",
+      "prompt": "We're a language-learning app. Compare interest in \"Yoga\" across as many Wikipedia language editions as you reasonably can -- at least 15 -- and tell us the top 3 fastest-growing markets.",
+      "notes": "Exercises the 2KB response cap / omitted-count path with a large --langs list.",
+      "expect": [
+        "Calls analyze with --langs containing at least 15 language codes",
+        "Handles a nonzero omitted count in the analyze response gracefully -- does not claim to have reported on every requested language if some were capped out of the response",
+        "Final answer correctly identifies and reports the top 3 fastest-growing languages from the (possibly capped) ranked list",
+        "Points to the Markdown report (or otherwise notes that the full per-language table is available there) rather than trying to enumerate every requested language in the chat reply itself",
+        "Total cli.py calls stay low (2, or a small constant number) -- does not call analyze once per language"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "two-turn-follow-up-add-language-and-rerank",
+      "turns": [
+        "Compare interest in astronomy in uk and pl",
+        "Now add German and rank by audience size instead"
+      ],
+      "notes": "Two-turn follow-up: turn 2 should be handled as an incremental update to the same analysis, not a from-scratch redo. --rank-by avg_monthly_views now exists (raw audience size, distinct from the growth-rate metrics yoy_growth/share_yoy_growth/momentum_6mo), so turn 2's request maps directly onto a real CLI option.",
+      "expect": [
+        "Turn 1: calls analyze with --topic astronomy and --langs uk,pl, then report -- 2 cli.py calls",
+        "Turn 2: re-runs analyze with --langs expanded to include de (uk, pl, and de all present) and --rank-by avg_monthly_views, rather than only fetching German in isolation or ignoring the re-rank request",
+        "Turn 2 does not write or execute any custom script/code to sort or filter results itself -- ranking is done via the CLI's own --rank-by, not hand-rolled logic",
+        "Across both turns, no data already fetched in turn 1 (uk, pl for the same date range) needs to be re-downloaded from Wikimedia -- the existing per-article/per-range disk cache means turn 2's added network cost is limited to the new language (de) and whatever site-aggregate/resolution calls are genuinely new"
+      ]
+    }
+  ]
+}
