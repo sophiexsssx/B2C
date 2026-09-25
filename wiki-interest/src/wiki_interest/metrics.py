@@ -159,17 +159,30 @@ def classify_spikes_and_seasonal(monthly: dict) -> tuple:
     return spike_months, seasonal_months
 
 
-def spike_free_series(monthly: dict, spike_months: set) -> dict:
+def spike_free_series(monthly: dict, spike_months: set, window: int = ROLLING_BASELINE_WINDOW_MONTHS) -> dict:
     """
-    Winsorize spike months to the series baseline (median) instead of
-    dropping them -- dropping would shrink 12-month sums unevenly depending
-    on how many spikes happened to fall in a given window. Seasonal peaks
-    are left untouched.
+    Winsorize spike months to their LOCAL rolling-window median -- the same
+    centered window detect_elevated_months uses to find them in the first
+    place -- instead of dropping them (dropping would shrink 12-month sums
+    unevenly depending on how many spikes happened to fall in a given
+    window) or replacing them with one GLOBAL median (which would reintroduce
+    exactly the problem the rolling baseline was built to avoid, see
+    detect_elevated_months's docstring: on a trending series, a single
+    whole-series median doesn't represent what was actually typical around
+    a given spike's own neighborhood). Seasonal peaks are left untouched.
     """
     if not spike_months:
         return dict(monthly)
-    baseline = round(_median(list(monthly.values())))
-    return {month: (baseline if month in spike_months else views) for month, views in monthly.items()}
+    months_sorted = sorted(monthly.keys())
+    values = [monthly[m] for m in months_sorted]
+    n = len(values)
+    half = window // 2
+    result = dict(monthly)
+    for i, month in enumerate(months_sorted):
+        if month in spike_months:
+            lo, hi = max(0, i - half), min(n, i + half + 1)
+            result[month] = round(_median(values[lo:hi]))
+    return result
 
 
 # ---------------------------------------------------------------------------
