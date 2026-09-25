@@ -13,8 +13,11 @@ import pytest
 
 from wiki_interest import metrics
 from wiki_interest.metrics import (
+    AVG_VIEWS_LOW_THRESHOLD,
+    AVG_VIEWS_MEDIUM_THRESHOLD,
     MANN_KENDALL_MIN_POINTS,
     classify_spikes_and_seasonal,
+    compute_average_monthly_views,
     compute_confidence,
     compute_momentum_6mo,
     compute_share_yoy_growth,
@@ -364,6 +367,63 @@ def test_momentum_6mo_known_value():
 
 
 # ---------------------------------------------------------------------------
+# 4b. compute_average_monthly_views
+# ---------------------------------------------------------------------------
+
+
+def test_average_monthly_views_period_avg_over_whole_requested_range():
+    monthly = _series("2023-01", 12, 300)  # 12 months at a constant 300
+
+    result = compute_average_monthly_views(monthly, period_start="2023-01", period_end="2023-12")
+
+    assert result["period_avg"] == pytest.approx(300)
+
+
+def test_average_monthly_views_last12_avg_uses_only_the_most_recent_12_months():
+    monthly = {}
+    monthly.update(_series("2021-01", 24, 100))  # older, lower-volume months
+    monthly.update(_series("2023-01", 12, 900))  # most recent 12 months, higher volume
+
+    result = compute_average_monthly_views(monthly, period_start="2021-01", period_end="2023-12")
+
+    # period_avg spans all 36 months (mixed 100s and 900s); last12_avg only the last 12 (all 900).
+    assert result["last12_avg"] == pytest.approx(900)
+    assert result["period_avg"] != pytest.approx(900)
+
+
+def test_average_monthly_views_uses_the_spike_free_series_passed_in():
+    # This function doesn't winsorize itself -- it just averages whatever
+    # series it's given, so a spike-free series produces a spike-free average.
+    with_spike = _series("2023-01", 12, 100)
+    with_spike["2023-06"] = 100_000
+    spike_free = spike_free_series(with_spike, {"2023-06"})
+
+    result_raw = compute_average_monthly_views(with_spike, period_start="2023-01", period_end="2023-12")
+    result_spike_free = compute_average_monthly_views(spike_free, period_start="2023-01", period_end="2023-12")
+
+    assert result_raw["period_avg"] > result_spike_free["period_avg"]
+    assert result_spike_free["period_avg"] == pytest.approx(100)
+
+
+def test_average_monthly_views_empty_series_returns_none_for_both():
+    result = compute_average_monthly_views({}, period_start="2023-01", period_end="2023-12")
+
+    assert result["period_avg"] is None
+    assert result["last12_avg"] is None
+
+
+def test_average_monthly_views_excludes_incomplete_current_month():
+    monthly = _series("2023-01", 12, 100)
+    monthly["2023-12"] = 100_000  # a huge number for the (excluded) in-progress month
+
+    result = compute_average_monthly_views(monthly, period_start="2023-01", period_end="2023-12", today=datetime(2023, 12, 15, tzinfo=timezone.utc))
+
+    # If the current month weren't excluded, this would be dragged way up.
+    assert result["period_avg"] == pytest.approx(100)
+    assert result["excluded_incomplete_month"] is True
+
+
+# ---------------------------------------------------------------------------
 # 5. mann_kendall_test
 # ---------------------------------------------------------------------------
 
@@ -473,6 +533,77 @@ def test_confidence_share_yoy_sign_disagreement_forces_low():
     )
     assert level == "low"
     assert "disagree" in reason.lower()
+
+
+def test_confidence_low_volume_forces_low_regardless_of_other_factors():
+    level, reason = compute_confidence(
+        yoy_growth_value=0.5,
+        yoy_growth_flag=None,
+        share_yoy_growth_value=0.3,
+        significant=True,
+        history_months=40,
+        match_confidence="high",
+        avg_monthly_views=AVG_VIEWS_LOW_THRESHOLD - 1,
+    )
+    assert level == "low"
+    assert "views/month" in reason.lower()
+
+
+def test_confidence_medium_volume_caps_high_at_medium_but_leaves_lower_levels_alone():
+    # Would otherwise be "high" -- volume caps it down to "medium".
+    level, reason = compute_confidence(
+        yoy_growth_value=0.5,
+        yoy_growth_flag=None,
+        share_yoy_growth_value=0.3,
+        significant=True,
+        history_months=40,
+        match_confidence="high",
+        avg_monthly_views=AVG_VIEWS_MEDIUM_THRESHOLD - 1,
+    )
+    assert level == "medium"
+    assert "views/month" in reason.lower()
+
+    # Already "low" from another factor -- medium-range volume must not raise it.
+    level_already_low, _ = compute_confidence(
+        yoy_growth_value=0.5,
+        yoy_growth_flag=None,
+        share_yoy_growth_value=-0.3,  # sign disagreement -> forces low
+        significant=True,
+        history_months=40,
+        match_confidence="high",
+        avg_monthly_views=AVG_VIEWS_MEDIUM_THRESHOLD - 1,
+    )
+    assert level_already_low == "low"
+
+
+def test_confidence_high_volume_does_not_restrict_level():
+    level, reason = compute_confidence(
+        yoy_growth_value=0.5,
+        yoy_growth_flag=None,
+        share_yoy_growth_value=0.3,
+        significant=True,
+        history_months=40,
+        match_confidence="high",
+        avg_monthly_views=AVG_VIEWS_MEDIUM_THRESHOLD + 1000,
+    )
+    assert level == "high"
+    assert "views/month" not in reason.lower()
+
+
+def test_confidence_omitted_avg_monthly_views_skips_the_volume_check_entirely():
+    # Backward compatible: omitting the (optional) parameter behaves exactly
+    # as if volume were never considered, e.g. for a caller that doesn't
+    # track it.
+    level, reason = compute_confidence(
+        yoy_growth_value=0.5,
+        yoy_growth_flag=None,
+        share_yoy_growth_value=0.3,
+        significant=True,
+        history_months=40,
+        match_confidence="high",
+    )
+    assert level == "high"
+    assert "views/month" not in reason.lower()
 
 
 @pytest.mark.parametrize(

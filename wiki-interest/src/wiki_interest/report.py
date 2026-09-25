@@ -47,7 +47,31 @@ import os
 
 from wiki_interest import charts
 
-BOT_WORDING = "excludes known bots and automated traffic"
+BOT_WORDING = "exclude known bots and automated traffic"
+# More than a handful of overlapping lines on one small chart stops being
+# readable -- cap the trend chart to the top languages by rank, same as the
+# table/summary use the rank order results is already saved in.
+MAX_CHART_LANGS = 5
+
+
+def _chart_series_and_omitted(results: list, series: dict) -> tuple:
+    """
+    (chart_series, omitted_count) for the trend chart -- the top
+    MAX_CHART_LANGS *chartable* results by rank (results is already in
+    rank order, see cli.py's run_analyze), where "chartable" means it
+    actually has an entry in `series`. A "no_data" result (main article
+    404, see cli.py) has no series entry at all, so without this filter it
+    could occupy one of the MAX_CHART_LANGS slots while drawing no line at
+    all, and would inflate the omitted count even though nothing about it
+    was actually left off the chart for space reasons. Filtering first
+    preserves rank order (filtering a list never reorders it), so this is
+    still genuinely the top N, not an arbitrary slice.
+    """
+    chartable_results = [r for r in results if r["lang"] in series]
+    chart_langs = [r["lang"] for r in chartable_results[:MAX_CHART_LANGS]]
+    chart_series = {lang: monthly for lang, monthly in series.items() if lang in chart_langs}
+    omitted_count = max(0, len(chartable_results) - MAX_CHART_LANGS)
+    return chart_series, omitted_count
 
 
 def method_note(period: dict) -> str:
@@ -69,7 +93,7 @@ def method_note(period: dict) -> str:
         f"Charts and tables above cover only the requested period ({period['start']} to {period['end']}). "
         f"{reference_months} additional month(s) before that period were fetched only to classify peaks as "
         f"seasonal vs. one-off, targeting {target} months of total history.{shortfall} "
-        f"Pageview counts only include regular readers -- this {BOT_WORDING}."
+        f"Pageview counts {BOT_WORDING}."
     )
     if period.get("used_reference_baseline_for_yoy"):
         note += (
@@ -108,6 +132,10 @@ def build_context_note(results: list) -> str:
 
 def _fmt_pct(value) -> str:
     return "n/a" if value is None else f"{value * 100:+.1f}%"
+
+
+def _fmt_views(value) -> str:
+    return "n/a" if value is None else f"{value:,.0f}"
 
 
 _MONTH_NAMES = [
@@ -169,11 +197,17 @@ def default_summary(run_data: dict) -> str:
     """
     A plain-language summary (the answer, the key number, and how much to
     trust it) for when the caller doesn't supply run_data["summary"]
-    directly (e.g. the agent's own --summary). Picks the result with the
-    largest |yoy_growth| as the headline. Normally 2-3 sentences; grows to
-    explain itself further when the headline is large but not
-    statistically significant, or when recent momentum tells a different
-    story than the full year.
+    directly (e.g. the agent's own --summary). The headline is
+    with_growth[0] -- the actual TOP-RANKED result, not "whichever language
+    happens to have the largest |yoy_growth|" -- because run_data["results"]
+    is saved by cli.py in --rank-by order (ranked entries first, best
+    first; see cli.py's run_analyze), so this is genuinely the #1 result a
+    reader would find at the top of the table below, not a value picked
+    independently of the ranking the rest of the report shows. Normally
+    2-3 sentences; grows to explain itself further when the headline is
+    large but not statistically significant, when recent momentum tells a
+    different story than the full year, or (multi-language) to name the
+    weakest performer and how many languages are growing vs. declining.
     """
     results = run_data.get("results", [])
     topic = run_data.get("topic", "this topic")
@@ -184,7 +218,7 @@ def default_summary(run_data: dict) -> str:
     if not with_growth:
         return f'None of the languages checked for "{topic}" had enough prior activity to measure a growth trend yet.'
 
-    headline = max(with_growth, key=lambda r: abs(r["yoy_growth"]))
+    headline = with_growth[0]
     direction = "grown" if headline["yoy_growth"] > 0 else "declined"
     pct = abs(headline["yoy_growth"]) * 100
     lang_note = f" in {headline['lang']}" if len(results) > 1 else ""
@@ -213,13 +247,17 @@ def default_summary(run_data: dict) -> str:
 
     others = [r for r in with_growth if r is not headline]
     if others:
-        same_direction = sum(1 for r in others if (r["yoy_growth"] > 0) == (headline["yoy_growth"] > 0))
-        if same_direction == len(others):
-            sentences.append("The other languages checked show the same direction of change.")
-        elif same_direction == 0:
-            sentences.append("The other languages checked show the opposite direction, so this pattern doesn't hold everywhere.")
-        else:
-            sentences.append("The other languages checked show a mixed picture.")
+        # Named by actual VALUE, not by position in the list -- "weakest"
+        # is whoever has the lowest signed yoy_growth (the worst decliner,
+        # or the smallest grower), which is not necessarily whichever
+        # language happened to be requested last.
+        growing = sum(1 for r in with_growth if r["yoy_growth"] > 0)
+        declining = sum(1 for r in with_growth if r["yoy_growth"] < 0)
+        weakest = min(with_growth, key=lambda r: r["yoy_growth"])
+        counts_sentence = f"Of the {len(with_growth)} languages with enough data to measure, {growing} are growing and {declining} are declining"
+        if weakest is not headline:
+            counts_sentence += f"; {weakest['lang'].upper()} shows the weakest trend, at {_fmt_pct(weakest['yoy_growth'])}"
+        sentences.append(counts_sentence + ".")
 
     return " ".join(sentences)
 
@@ -281,11 +319,11 @@ def render_markdown(run_data: dict) -> str:
     lines.append("## Key numbers")
     lines.append("")
     if results:
-        lines.append("| Language | Title | Year-over-year | vs. all Wikipedia traffic | Last 6 months | Steady trend? | Confidence |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("| Language | Title | Avg. monthly views | Year-over-year | vs. all Wikipedia traffic | Last 6 months | Steady trend? | Confidence |")
+        lines.append("|---|---|---|---|---|---|---|---|")
         for r in results:
             lines.append(
-                f"| {r['lang']} | {r.get('title', '')} | {_fmt_pct(r.get('yoy_growth'))} | "
+                f"| {r['lang']} | {r.get('title', '')} | {_fmt_views(r.get('avg_monthly_views'))} | {_fmt_pct(r.get('yoy_growth'))} | "
                 f"{_fmt_pct(r.get('share_yoy_growth'))} | {_fmt_pct(r.get('momentum_6mo'))} | "
                 f"{'yes' if r.get('significant') else 'no'} | {r.get('confidence', 'n/a')} |"
             )
@@ -342,6 +380,28 @@ def _fit_block(lines: list, row_height_ratio: float, total_height_ratio: float, 
     return fontsize, wrapped
 
 
+def _body_start_y(row_height_ratio: float, total_height_ratio: float, page_height_inches: float, heading_fontsize: float, padding_pt: float = 3.0) -> float:
+    """
+    The y (axes-fraction, 1.0 = top) where a section's body text can start
+    without colliding with its own bold heading directly above it. A fixed
+    offset (e.g. always y=0.82) looks fine for a row with generous height,
+    but the trust-notes/method rows can shrink a lot when many languages
+    push extra height into the table above them (see render_pdf's
+    extra_table_share) -- the same 18%-of-the-row gap that comfortably
+    clears a 12pt heading in a tall row can be smaller than the heading's
+    own rendered height in a squeezed one, so the body's first line ends
+    up drawn right on top of the heading. Uses the same row-height-to-
+    inches conversion (the "0.42" fudge factor) _fit_block already relies
+    on, so it stays consistent with how much of this row's nominal height
+    actually renders.
+    """
+    row_height_inches = page_height_inches * (row_height_ratio / total_height_ratio) * 0.42
+    heading_height_inches = (heading_fontsize / 72) * 1.35 + (padding_pt / 72)
+    if row_height_inches <= 0:
+        return 0.75
+    return max(0.45, 1.0 - heading_height_inches / row_height_inches)
+
+
 def render_pdf(run_data: dict, output_path: str) -> str:
     """
     One-page PDF: header, plain-language summary, key numbers table, trend
@@ -369,9 +429,9 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     # after it or, pulled closer, colliding with those tick labels
     # instead. A real gridspec row can only ever occupy its own space.
     if show_growth_chart:
-        n_rows, height_ratios = 8, [0.45, 1.05, 1.2, 3.0, 0.4, 1.25, 1.55, 1.3]
+        n_rows, height_ratios = 8, [0.6, 1.05, 1.2, 2.85, 0.4, 1.25, 1.55, 1.3]
     else:
-        n_rows, height_ratios = 7, [0.45, 1.05, 1.2, 3.6, 0.4, 1.65, 1.4]
+        n_rows, height_ratios = 7, [0.6, 1.05, 1.2, 3.45, 0.4, 1.65, 1.4]
     # More languages need a taller table row; split the extra space between
     # the trend chart (which has generous headroom to begin with) and trust
     # notes (which already shrinks its own font for long content -- see
@@ -388,7 +448,12 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     page_height_inches = 11.0
 
     fig = plt.figure(figsize=(8.5, page_height_inches))
-    grid = fig.add_gridspec(n_rows, 1, height_ratios=height_ratios, hspace=1.1)
+    # left/right narrower than matplotlib's ~12.5%/10% defaults -- the page
+    # was leaving real usable width on the table unused. top/bottom left at
+    # their defaults deliberately: _fit_block's vertical-fit calibration
+    # (the "0.42" fudge factor) was measured against the default vertical
+    # margins, and this fix is specifically about horizontal space.
+    grid = fig.add_gridspec(n_rows, 1, height_ratios=height_ratios, hspace=1.1, left=0.08, right=0.97)
     row = iter(range(n_rows))
 
     # -- header --
@@ -396,9 +461,9 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     ax_header.axis("off")
     topic = run_data.get("topic", "(topic)")
     ax_header.text(0, 1.0, f"Wiki interest report: {topic}", fontsize=16, fontweight="bold", va="top")
-    ax_header.text(0, 0.15, f"Period: {period['start']} to {period['end']}", fontsize=9, va="top", color="#444444")
+    ax_header.text(0, 0.0, f"Period: {period['start']} to {period['end']}", fontsize=9, va="top", color="#444444")
     if not results:
-        ax_header.text(1.0, 0.15, "No data found for this topic.", fontsize=10, va="top", ha="right", color="#b91c1c", fontweight="bold")
+        ax_header.text(1.0, 0.0, "No data found for this topic.", fontsize=10, va="top", ha="right", color="#b91c1c", fontweight="bold")
 
     # -- plain-language summary (dynamically sized: the summary can now grow
     # to explain a step-change or momentum divergence, see default_summary) --
@@ -411,10 +476,11 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     # -- key numbers table --
     ax_table = fig.add_subplot(grid[next(row)])
     ax_table.axis("off")
-    col_labels = ["Language", "Year-over-year", "vs. all Wikipedia traffic", "Last 6 months", "Steady trend?", "Confidence"]
+    col_labels = ["Language", "Avg. views/mo", "Year-over-year", "vs. all Wikipedia traffic", "Last 6 months", "Steady trend?", "Confidence"]
     all_rows = [
         [
             r["lang"],
+            _fmt_views(r.get("avg_monthly_views")),
             _fmt_pct(r.get("yoy_growth")),
             _fmt_pct(r.get("share_yoy_growth")),
             _fmt_pct(r.get("momentum_6mo")),
@@ -423,10 +489,17 @@ def render_pdf(run_data: dict, output_path: str) -> str:
         ]
         for r in results
     ]
-    # Row height only shrinks so far before text is illegible -- past that,
-    # more languages just means a taller table with no ceiling. Cap the
-    # rows actually drawn (same pattern as the trust-notes cap below) and
-    # point to the Markdown report, which has no such limit, for the rest.
+    # Font never shrinks below MIN_TABLE_FONTSIZE -- a printed table
+    # smaller than that stops being reliably readable, so past that point
+    # the only lever left is showing fewer rows (same pattern as the trust
+    # notes cap below), not smaller and smaller text. Start from a generous
+    # cap and let the measured height-correction loop below trim it down to
+    # what actually fits -- an UPFRONT closed-form prediction of "how many
+    # rows fit at 8pt" was tried and measured badly short (the "0.42"
+    # fudge factor is calibrated for _fit_block's text blocks, not a
+    # matplotlib Table, and the two don't transfer 1:1), so real
+    # measurement, not a formula, decides the row count here.
+    MIN_TABLE_FONTSIZE = 8.0
     max_table_rows = 8
     rows = all_rows[:max_table_rows]
     omitted_rows = len(all_rows) - len(rows)
@@ -434,7 +507,7 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     table = ax_table.table(cellText=rows or empty_row, colLabels=col_labels, loc="center", cellLoc="center")
     table.auto_set_font_size(False)
     n_total_rows = len(rows) + 1  # + header row
-    fontsize = 10.5 if n_total_rows <= 5 else 6.5
+    fontsize = 10.5 if n_total_rows <= 5 else MIN_TABLE_FONTSIZE
     scale_y = 1.7 if n_total_rows <= 5 else 1.0
     table.set_fontsize(fontsize)
     table.scale(1, scale_y)
@@ -452,24 +525,90 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     renderer = fig.canvas.get_renderer()
     table_bbox = table.get_window_extent(renderer)
     axes_bbox = ax_table.get_window_extent()
+    # Unlike row height, auto_set_column_width has no notion of the axes'
+    # actual width either -- it sizes each column from its widest cell's
+    # rendered text, and the columns' total can simply run off the page
+    # edges if the content is wide (verified: adding the volume column
+    # pushed "Language" and "Confidence" off both sides at the previous
+    # fontsize). Same measured correction, applied horizontally -- but
+    # unlike row height, matplotlib's Table re-runs auto_set_column_width's
+    # own sizing on every subsequent draw (Table._update_positions() calls
+    # _auto_set_column_width() for every column index it remembers being
+    # auto-set), which would silently undo this scale() the next time the
+    # figure is drawn (e.g. at savefig()) -- clearing that memory makes the
+    # correction actually stick.
+    if table_bbox.width > axes_bbox.width:
+        correction_x = axes_bbox.width / table_bbox.width
+        table.scale(correction_x, 1)
+        table._autoColumns = []
+        # The cell boxes are now narrower, but the text inside them is
+        # still sized for the wider boxes auto_set_column_width originally
+        # fit it to -- shrink the font by the same factor so header/cell
+        # text doesn't overflow into its neighbor. Floored at
+        # MIN_TABLE_FONTSIZE like everywhere else -- the wider margins
+        # below make this correction small in practice (verified), so
+        # hitting the floor here would mean genuinely too much column
+        # content for the page, not a routine case.
+        fontsize = max(MIN_TABLE_FONTSIZE, fontsize * correction_x)
+        table.set_fontsize(fontsize)
     # Leave a clear strip below the table for the "...and N more" note.
     target_frac = 0.82 if omitted_rows else 0.95
-    if table_bbox.height > axes_bbox.height * target_frac:
-        # scale() multiplies the table's CURRENT size, not an absolute
-        # value -- passing the correction factor alone (not the new
-        # cumulative scale_y) avoids double-applying the first scale() call.
-        correction = (axes_bbox.height * target_frac) / table_bbox.height
-        table.scale(1, correction)
+    if fontsize > MIN_TABLE_FONTSIZE + 0.01:
+        # Comfortable headroom above the font floor (the common few-
+        # language case, base fontsize 10.5) -- a small scale compress is
+        # harmless here, same as this always worked before the floor rule
+        # existed at all.
+        if table_bbox.height > axes_bbox.height * target_frac:
+            correction = (axes_bbox.height * target_frac) / table_bbox.height
+            table.scale(1, correction)
+    else:
+        # Already at MIN_TABLE_FONTSIZE -- scale() shrinks a row's box
+        # without shrinking the text inside it, so compressing further
+        # risks the same row-into-row text overlap the font floor exists
+        # to prevent, just vertically instead of horizontally. Drop rows
+        # and rebuild instead (same pattern as the trust-notes cap).
+        while table_bbox.height > axes_bbox.height * target_frac and len(rows) > 1:
+            rows = rows[:-1]
+            omitted_rows += 1
+            target_frac = 0.82
+            table.remove()
+            table = ax_table.table(cellText=rows, colLabels=col_labels, loc="center", cellLoc="center")
+            table.auto_set_font_size(False)
+            table.set_fontsize(fontsize)
+            table.scale(1, scale_y)
+            table.auto_set_column_width(list(range(len(col_labels))))
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+            table_bbox = table.get_window_extent(renderer)
+            axes_bbox = ax_table.get_window_extent()
+            if table_bbox.width > axes_bbox.width:
+                correction_x = axes_bbox.width / table_bbox.width
+                table.scale(correction_x, 1)
+                table._autoColumns = []
+                fontsize = max(MIN_TABLE_FONTSIZE, fontsize * correction_x)
+                table.set_fontsize(fontsize)
     if omitted_rows:
         ax_table.text(0.5, 0.02, f"...and {omitted_rows} more language(s) -- see the Markdown report for the full table.", fontsize=7, ha="center", va="top", transform=ax_table.transAxes, style="italic", color="#444444")
 
     # -- trend chart (drawn directly onto this page's subplot, not copied
     # from a standalone figure -- see charts.py's ax= parameter), with its
     # legend on its own dedicated row right after it (see build_trend_chart's
-    # legend_ax docstring for why) --
+    # legend_ax docstring for why) -- capped to the top MAX_CHART_LANGS
+    # chartable results by rank, since more than a handful of overlapping
+    # lines stops being readable (see _chart_series_and_omitted).
+    chart_series, omitted_chart_langs = _chart_series_and_omitted(results, series)
     ax_trend = fig.add_subplot(grid[next(row)])
     ax_trend_legend = fig.add_subplot(grid[next(row)])
-    charts.build_trend_chart(series, period["start"], period["end"], ax=ax_trend, spikes_by_lang=spike_months, seasonal_by_lang=seasonal_months, legend_ax=ax_trend_legend)
+    charts.build_trend_chart(
+        chart_series,
+        period["start"],
+        period["end"],
+        ax=ax_trend,
+        spikes_by_lang=spike_months,
+        seasonal_by_lang=seasonal_months,
+        legend_ax=ax_trend_legend,
+        omitted_lang_count=omitted_chart_langs,
+    )
 
     # -- growth comparison chart: only meaningful with >=2 series to compare --
     if show_growth_chart:
@@ -500,16 +639,20 @@ def render_pdf(run_data: dict, output_path: str) -> str:
     context = build_context_note(results)
     if context:
         trust_lines.append(context)
-    trust_fontsize, trust_wrapped = _fit_block(trust_lines, height_ratios[trust_row_index], total_ratio, page_height_inches, base_fontsize=9.0, wrap_width=100)
-    ax_trust.text(0, 0.82, trust_wrapped, fontsize=trust_fontsize, va="top")
+    trust_heading_fontsize = 12
+    trust_body_y = _body_start_y(height_ratios[trust_row_index], total_ratio, page_height_inches, trust_heading_fontsize)
+    trust_fontsize, trust_wrapped = _fit_block(trust_lines, height_ratios[trust_row_index] * trust_body_y, total_ratio, page_height_inches, base_fontsize=9.0, wrap_width=100)
+    ax_trust.text(0, trust_body_y, trust_wrapped, fontsize=trust_fontsize, va="top")
 
     # -- method & limits --
     method_row_index = next(row)
     ax_method = fig.add_subplot(grid[method_row_index])
     ax_method.axis("off")
     ax_method.text(0, 1.0, "Method & limits", fontsize=12, fontweight="bold", va="top")
-    method_fontsize, method_wrapped = _fit_block([method_note(period)], height_ratios[method_row_index], total_ratio, page_height_inches, base_fontsize=9.0, wrap_width=105)
-    ax_method.text(0, 0.82, method_wrapped, fontsize=method_fontsize, va="top")
+    method_heading_fontsize = 12
+    method_body_y = _body_start_y(height_ratios[method_row_index], total_ratio, page_height_inches, method_heading_fontsize)
+    method_fontsize, method_wrapped = _fit_block([method_note(period)], height_ratios[method_row_index] * method_body_y, total_ratio, page_height_inches, base_fontsize=9.0, wrap_width=105)
+    ax_method.text(0, method_body_y, method_wrapped, fontsize=method_fontsize, va="top")
 
     fig.savefig(output_path, format="pdf")
     plt.close(fig)
@@ -536,14 +679,21 @@ def build_report(run_data: dict, output_dir: str) -> dict:
 
     period = run_data["period"]
     series = run_data.get("series", {})
+    results = run_data.get("results", [])
+
+    # Same top-MAX_CHART_LANGS-chartable-by-rank cap as render_pdf's
+    # embedded chart (see _chart_series_and_omitted) -- this standalone
+    # chart.png should show the same picture, not a different, uncapped one.
+    chart_series, omitted_chart_langs = _chart_series_and_omitted(results, series)
 
     trend_fig = charts.build_trend_chart(
-        series,
+        chart_series,
         period["start"],
         period["end"],
         title=f"Monthly interest: {run_data.get('topic', '')}",
         spikes_by_lang=run_data.get("spike_months", {}),
         seasonal_by_lang=run_data.get("seasonal_months", {}),
+        omitted_lang_count=omitted_chart_langs,
     )
     png_path = charts.save_chart_png(trend_fig, os.path.join(output_dir, "chart.png"))
 

@@ -45,10 +45,6 @@ _WIKIDATA_SITEID_ALIASES = {
 _NON_WIKIPEDIA_SITEIDS = {"commons", "meta", "species", "mediawiki", "wikifunctions", "abstract"}
 
 
-class ContactNotConfiguredError(RuntimeError):
-    """Raised when WIKITREND_CONTACT is not set -- we refuse to send a bare User-Agent."""
-
-
 class OutOfRangeError(RuntimeError):
     """Raised when the requested range starts before the Pageviews API's data (July 2015)."""
 
@@ -67,10 +63,14 @@ class _NotFoundResponse(Exception):
     """Internal: signals a 404 up to the caller that knows how to interpret it."""
 
 
+DEFAULT_CONTACT = "https://github.com/sophiexsssx/B2C"
+
+
 def _compliant_user_agent() -> str:
     """
-    Build the required Wikimedia User-Agent from WIKITREND_CONTACT, raising
-    ContactNotConfiguredError if it's unset.
+    Build the required Wikimedia User-Agent -- from WIKITREND_CONTACT if
+    it's set, else DEFAULT_CONTACT (this project's own repo URL, a real,
+    traceable contact point).
 
     Wikimedia has required a descriptive User-Agent with contact info on
     every request since Feb 2010; non-descriptive/absent ones "may be
@@ -78,17 +78,15 @@ def _compliant_user_agent() -> str:
     and a bare `requests.Session()` already carries its own default
     ("python-requests/x.y.z"), which is exactly the kind of non-descriptive
     default value that warning is about, so this can't be a "set only if
-    missing" check. Shared by build_session() and _get_json() so the header
-    is enforced at the one place every request actually goes through, not
-    just for callers who remembered to use build_session().
+    missing" check. WIKITREND_CONTACT lets a fork or a different deployment
+    override it with their own contact, but nothing here should ever HAVE
+    to be configured just to make a request -- the repo URL alone already
+    satisfies Wikimedia's requirement. Shared by build_session() and
+    _get_json() so the header is enforced at the one place every request
+    actually goes through, not just for callers who remembered to use
+    build_session().
     """
-    contact = os.environ.get("WIKITREND_CONTACT")
-    if not contact:
-        raise ContactNotConfiguredError(
-            "WIKITREND_CONTACT is not set. Wikimedia requires a descriptive "
-            "User-Agent with contact info on every request -- set e.g. "
-            "WIKITREND_CONTACT='https://example.org/wiki-interest; you@example.org'"
-        )
+    contact = os.environ.get("WIKITREND_CONTACT") or DEFAULT_CONTACT
     return f"WikiInterestBot/1.0 ({contact})"
 
 

@@ -20,9 +20,11 @@ for _path in (_SRC, _ROOT):
 @pytest.fixture(autouse=True)
 def _default_wikitrend_contact(monkeypatch):
     """
-    Give every test a WIKITREND_CONTACT by default, since _get_json() now
-    requires one on every request. Tests that specifically exercise the
-    missing/custom-contact behavior call monkeypatch.delenv/setenv
-    themselves, which overrides this default within that test.
+    Give every test an explicit WIKITREND_CONTACT by default -- optional at
+    runtime (api_client falls back to DEFAULT_CONTACT, its own repo URL, if
+    unset), but tests should assert against a known, explicit value rather
+    than depend on that fallback. Tests that specifically exercise the
+    unset/custom-contact behavior call monkeypatch.delenv/setenv themselves,
+    which overrides this default within that test.
     """
     monkeypatch.setenv("WIKITREND_CONTACT", "https://example.org/wiki-interest; test@example.org")

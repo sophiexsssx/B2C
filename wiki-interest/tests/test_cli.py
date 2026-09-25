@@ -172,6 +172,51 @@ def test_analyze_does_not_cap_when_well_under_budget(requests_mock, session):
 
 
 # ---------------------------------------------------------------------------
+# 3b. avg_monthly_views / last12_avg_monthly_views / --rank-by avg_monthly_views
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_results_include_avg_monthly_views_fields(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema"})
+    _mock_pageviews(requests_mock, article_views=250)
+
+    response = cli.run_analyze("Topic", ["de"], start="2024-01", end="2024-12", session=session)
+
+    result = (response["ranked"] + response["unranked"])[0]
+    assert result["avg_monthly_views"] == pytest.approx(250, abs=1)
+    assert result["last12_avg_monthly_views"] == pytest.approx(250, abs=1)
+
+
+def test_rank_by_avg_monthly_views_sorts_by_raw_volume_not_growth(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema", "pl": "Temat"})
+    _mock_pageviews(requests_mock)  # uniform views for the broad mock -- override per-language below
+
+    # "de" has a much higher volume but identical (uniform) growth to "pl" --
+    # ranking by avg_monthly_views must put the higher-volume language first,
+    # which the default yoy_growth ranking (both 0.0, alphabetical/stable
+    # order) wouldn't distinguish.
+    import re
+
+    from wiki_interest.api_client import PAGEVIEWS_BASE
+
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/de\.wikipedia/.*"), json={"items": _broad_items(5000)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/pl\.wikipedia/.*"), json={"items": _broad_items(100)})
+
+    response = cli.run_analyze("Topic", ["de", "pl"], start="2024-01", end="2024-12", rank_by="avg_monthly_views", session=session)
+
+    ranked_langs = [r["lang"] for r in response["ranked"]]
+    assert ranked_langs == ["de", "pl"]
+
+
+def test_rank_by_avg_monthly_views_is_a_valid_argparse_choice():
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["analyze", "--topic", "Topic", "--langs", "de", "--rank-by", "avg_monthly_views"])
+
+    assert args.rank_by == "avg_monthly_views"
+
+
+# ---------------------------------------------------------------------------
 # 4. run_id is always server-generated
 # ---------------------------------------------------------------------------
 
@@ -775,3 +820,84 @@ def test_build_headline_preserves_significance_suffix_on_the_comparison_target()
 
     assert headline.startswith("PL")
     assert "DE trend not significant" in headline
+
+
+# ---------------------------------------------------------------------------
+# 17. Saved results follow --rank-by order, not request/alphabetical order
+# ---------------------------------------------------------------------------
+
+
+def test_saved_results_are_rank_ordered_not_alphabetical(requests_mock, session):
+    # "aa" is requested first and sorts first alphabetically, but "zz" is
+    # the actual best grower -- both report.py's table/chart AND any
+    # "top N" slicing take run_data["results"] as given, so the SAVED
+    # order (not just the JSON response's "ranked" list) must reflect the
+    # real ranking, or a naive positional "top 8" would silently show the
+    # wrong languages.
+    _mock_resolution(requests_mock, {"aa": "TopicAA", "mm": "TopicMM", "zz": "TopicZZ"})
+    import re
+
+    from wiki_interest.api_client import PAGEVIEWS_BASE
+
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/aa\.wikipedia/.*"), json={"items": _broad_items(50)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/mm\.wikipedia/.*"), json={"items": _broad_items(5000)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/zz\.wikipedia/.*"), json={"items": _broad_items(500)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/aggregate/.*"), json={"items": _broad_items(100000)})
+
+    response = cli.run_analyze("Topic", ["aa", "mm", "zz"], start="2024-01", end="2024-12", session=session)
+
+    saved = cache.load_run_data(response["run_id"])
+    saved_lang_order = [r["lang"] for r in saved["results"]]
+    # Uniform-views mocks all give yoy_growth == 0.0 (see this file's module
+    # docstring), so rank_series's sort is stable -- it preserves whichever
+    # order the results were originally built in (request order: aa, mm,
+    # zz), which does NOT coincidentally equal alphabetical order here on
+    # its own. The point of this test is structural: saved["results"] must
+    # be EXACTLY the ranked+unranked concatenation the response itself
+    # used, not a re-derived or different order -- assert that equality
+    # directly, which is what actually catches a regression back to raw
+    # insertion order if that concatenation is ever dropped.
+    assert saved_lang_order == [r["lang"] for r in response["ranked"]] + [r["lang"] for r in response["unranked"]]
+    assert saved.get("rank_by") == "yoy_growth"
+
+
+def test_saved_results_rank_order_with_real_growth_differences(requests_mock, session):
+    # Same as above, but with genuinely different growth rates so the sort
+    # isn't just "stable on ties" -- "zz" (best grower) must end up FIRST
+    # in saved results despite sorting last alphabetically and being
+    # requested last.
+    _mock_resolution(requests_mock, {"aa": "TopicAA", "zz": "TopicZZ"})
+    import re
+
+    from wiki_interest.api_client import PAGEVIEWS_BASE
+
+    # A flat-then-doubled series gives a large positive yoy_growth; a
+    # flat-then-halved series gives a large negative one.
+    def _step_items(before, after):
+        items = []
+        year, month = 2015, 7
+        while (year, month) < (2024, 1):
+            items.append({"timestamp": f"{year:04d}{month:02d}0100", "views": before})
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+        while (year, month) <= (2024, 12):
+            items.append({"timestamp": f"{year:04d}{month:02d}0100", "views": after})
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+        return items
+
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/aa\.wikipedia/.*"), json={"items": _step_items(1000, 100)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/zz\.wikipedia/.*"), json={"items": _step_items(100, 1000)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/aggregate/.*"), json={"items": _broad_items(100000)})
+
+    response = cli.run_analyze("Topic", ["aa", "zz"], start="2023-01", end="2024-12", session=session)
+
+    saved = cache.load_run_data(response["run_id"])
+    saved_lang_order = [r["lang"] for r in saved["results"]]
+
+    assert saved_lang_order[0] == "zz"  # the real best grower, despite sorting last alphabetically
+    assert saved_lang_order[1] == "aa"

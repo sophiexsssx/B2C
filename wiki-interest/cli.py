@@ -54,7 +54,7 @@ OVERRIDE_MATCH_REASON = "manually specified via --article, not cross-checked aga
 # States" has 301) -- most carry negligible traffic, and fetching each one is
 # its own HTTP call, so cap how many count toward a language's topic total.
 MAX_REDIRECTS_PER_LANGUAGE = 50
-RANK_BY_CHOICES = ["yoy_growth", "share_yoy_growth", "momentum_6mo"]
+RANK_BY_CHOICES = ["yoy_growth", "share_yoy_growth", "momentum_6mo", "avg_monthly_views"]
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +423,7 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         share_yoy = metrics.compute_share_yoy_growth(spike_free, site_monthly, end, today)
         momentum = metrics.compute_momentum_6mo(spike_free, end, today)
         trend = metrics.compute_trend_significance(spike_free, site_monthly, start, end, today)
+        avg_views = metrics.compute_average_monthly_views(spike_free, start, end, today)
 
         lang_match_confidence = OVERRIDE_MATCH_CONFIDENCE if lang in overrides else match_confidence
         lang_match_reason = OVERRIDE_MATCH_REASON if lang in overrides else match_reason
@@ -434,6 +435,7 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
             history_months=period["actual_history_months"],
             match_confidence=lang_match_confidence,
             significance_insufficient_data=trend["insufficient_data"],
+            avg_monthly_views=avg_views["period_avg"],
         )
         if lang_match_confidence != "high":
             reason = f"{reason}; {lang_match_reason}"
@@ -451,6 +453,8 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
                 "yoy_growth_flag": yoy["flag"],
                 "share_yoy_growth": share_yoy["value"],
                 "momentum_6mo": momentum["value"],
+                "avg_monthly_views": round(avg_views["period_avg"]) if avg_views["period_avg"] is not None else None,
+                "last12_avg_monthly_views": round(avg_views["last12_avg"]) if avg_views["last12_avg"] is not None else None,
                 "spikes_removed": len(period_spikes),
                 "seasonal_peaks_kept": len(period_seasonal),
                 "significant": trend["significant"],
@@ -463,6 +467,13 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         spike_months_out[lang] = period_spikes
         seasonal_months_out[lang] = period_seasonal
 
+    # rank_series's order (best-ranked first, within "ranked"; "unranked"
+    # after) is what the agent already sees in the JSON response below --
+    # save results in that SAME order, not raw request-iteration order, so
+    # report.py's table/chart rows (which just take results as given) show
+    # the actual ranking too, not an arbitrary one that happens to match
+    # whatever order --langs was typed in.
+    ranked, unranked = metrics.rank_series(results, rank_by)
     period_for_run = {k: v for k, v in period.items() if k != "reference_start"}
     requested_run_id = cache.generate_run_id()
     run_data = {
@@ -472,7 +483,8 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         "series": series,
         "spike_months": spike_months_out,
         "seasonal_months": seasonal_months_out,
-        "results": results,
+        "results": ranked + unranked,
+        "rank_by": rank_by,
         "missing": missing,
     }
     run_id = cache.save_run_data(requested_run_id, run_data)
@@ -486,7 +498,6 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         run_data["run_id"] = run_id
         cache.save_run_data(run_id, run_data)
 
-    ranked, unranked = metrics.rank_series(results, rank_by)
     response_period = {"start": start, "end": end, "reference_months_before": period["reference_months_before"], "reference_reason": period["reference_reason"]}
     if period_note:
         response_period["note"] = period_note
@@ -606,7 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
     # only other value exercised there) -- not the wider Wikimedia enum
     # (spider/automated/etc.) that was never curl-verified for this project.
     analyze.add_argument("--agent", default="user", choices=["user", "all-agents"], help='Traffic filter (default "user": excludes known bots and automated traffic).')
-    analyze.add_argument("--rank-by", default="yoy_growth", dest="rank_by", choices=RANK_BY_CHOICES, help="Result field to sort by (default: yoy_growth, already spike-free).")
+    analyze.add_argument("--rank-by", default="yoy_growth", dest="rank_by", choices=RANK_BY_CHOICES, help="Result field to sort by (default: yoy_growth, already spike-free; avg_monthly_views ranks by raw audience size instead of a growth rate).")
     analyze.add_argument("--article", action="append", default=[], metavar='lang:"Title"', help='Override resolution for one language, e.g. pl:"Przerywany post". Repeatable.')
     # No --run-id here, deliberately: run_id is always server-generated (notes/plan.md) --
     # a caller-supplied one on `analyze` isn't a recognized argument at all.
@@ -627,7 +638,6 @@ def build_parser() -> argparse.ArgumentParser:
 # Exception type -> a short, actionable hint for the agent calling this CLI,
 # since a raw exception message alone often doesn't say what to DO about it.
 _ERROR_HINTS = (
-    (api_client.ContactNotConfiguredError, "set the WIKITREND_CONTACT environment variable to a URL/email Wikimedia can use to reach you, then retry"),
     (api_client.OutOfRangeError, "use a --start on or after 2015-07 (the Pageviews API has no earlier data)"),
     (api_client.AmbiguousNoDataError, "the article may genuinely have no data yet, or Wikimedia hasn't loaded it -- retry later, or check the title with `resolve`"),
     (ValueError, "check the argument that was rejected and correct it, then retry"),

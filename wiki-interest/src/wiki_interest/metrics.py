@@ -327,6 +327,32 @@ def compute_momentum_6mo(spike_free_monthly: dict, period_end: str, today=None) 
     return {"value": value, "flag": flag, "excluded_incomplete_month": excluded_incomplete_month}
 
 
+def compute_average_monthly_views(spike_free_monthly: dict, period_start: str, period_end: str, today=None) -> dict:
+    """
+    Plain audience-size figures to sit alongside the growth-rate metrics
+    above, which say nothing about absolute scale -- a 200% YoY grower with
+    5 monthly views and one with 50,000 are very different findings, and a
+    percentage alone can't tell them apart. Both are averages over the
+    spike-free series (so one winsorized outlier month doesn't skew the mean):
+    "period_avg" over the whole requested [period_start, period_end], and
+    "last12_avg" over just the most recent 12 months of it -- the more
+    current figure when the requested period is long. Excludes an
+    in-progress current month the same way the growth metrics do.
+
+    Returns {"period_avg": float|None, "last12_avg": float|None,
+             "excluded_incomplete_month": bool}. None for either average
+    only if there are literally no months of data to average (an empty
+    series) -- unlike the growth metrics, a short history is still a valid
+    average, just over fewer months.
+    """
+    period_end, excluded_incomplete_month = _clamp_to_complete_month(period_end, today)
+    period_months = [m for m in spike_free_monthly if period_start <= m <= period_end]
+    period_avg = (_sum_months(spike_free_monthly, period_months) / len(period_months)) if period_months else None
+    last12 = _last_n_months(spike_free_monthly, period_end, 12)
+    last12_avg = (_sum_months(spike_free_monthly, last12) / len(last12)) if last12 else None
+    return {"period_avg": period_avg, "last12_avg": last12_avg, "excluded_incomplete_month": excluded_incomplete_month}
+
+
 # ---------------------------------------------------------------------------
 # Trend significance
 # ---------------------------------------------------------------------------
@@ -479,6 +505,10 @@ def _sign(x: float) -> int:
     return (x > 0) - (x < 0)
 
 
+AVG_VIEWS_LOW_THRESHOLD = 300
+AVG_VIEWS_MEDIUM_THRESHOLD = 3000
+
+
 def compute_confidence(
     *,
     yoy_growth_value,
@@ -488,6 +518,7 @@ def compute_confidence(
     history_months,
     match_confidence,
     significance_insufficient_data=False,
+    avg_monthly_views=None,
 ) -> tuple:
     """
     Always returns (level, reason) -- the assignment's hard requirement that
@@ -508,6 +539,16 @@ def compute_confidence(
     tested and found no trend" and "not significant because there wasn't
     enough data to test at all" would get the same generic reason, which
     is misleading -- they're very different levels of evidence.
+
+    `avg_monthly_views` (optional -- pass compute_average_monthly_views's
+    "period_avg" to enable this check, or omit/None to skip it): a low-
+    traffic topic's percentage swings are noisier and easier to
+    misinterpret than the same swing on a high-traffic one (a handful of
+    extra readers can look like a huge percentage move), so volume caps
+    confidence independently of everything else above -- under
+    AVG_VIEWS_LOW_THRESHOLD forces "low" outright (like a bad match
+    confidence does), under AVG_VIEWS_MEDIUM_THRESHOLD caps it at "medium"
+    (never raises it, only ever pulls "high" down).
     """
     if yoy_growth_value is None:
         if yoy_growth_flag == "insufficient_history":
@@ -539,6 +580,14 @@ def compute_confidence(
     elif match_confidence == "medium":
         level = _CONFIDENCE_DOWNGRADE[level]
         reasons.append("cross-language article match confidence is medium")
+
+    if avg_monthly_views is not None:
+        if avg_monthly_views < AVG_VIEWS_LOW_THRESHOLD:
+            level = "low"
+            reasons.append(f"average interest is low (~{avg_monthly_views:.0f} views/month) -- a small audience makes any percentage swing look more dramatic than it really is")
+        elif avg_monthly_views < AVG_VIEWS_MEDIUM_THRESHOLD and level == "high":
+            level = "medium"
+            reasons.append(f"average interest is modest (~{avg_monthly_views:.0f} views/month) -- a moderate-sized audience, worth some caution before treating this as a strong signal")
 
     if not reasons:
         reasons.append(f"{REFERENCE_TARGET_MONTHS}mo+ history; trend significant; share_yoy_growth agrees in sign")
