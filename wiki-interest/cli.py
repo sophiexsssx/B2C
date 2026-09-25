@@ -165,6 +165,18 @@ def _max_age_for_range(end: str, today=None):
     return CURRENT_MONTH_MAX_AGE_SECONDS if metrics.is_current_month(end, today) else None
 
 
+def _is_recent_range(end: str, today=None) -> bool:
+    """
+    "Recent" per api_client.AmbiguousNoDataError's documented policy (an
+    in-range 404 should stay retryable for a recent period, since Wikimedia
+    may simply not have finished loading it yet, vs. treated as likely-zero
+    for an older, fully-in-range one) -- reuses the same is_current_month
+    check _max_age_for_range already relies on for the analogous "this
+    range might still change" cache-TTL decision.
+    """
+    return metrics.is_current_month(end, today)
+
+
 def _fetch_article_monthly(session, project, article, start, end, agent, today=None) -> dict:
     key = cache.cache_key(fn="per_article", project=project, article=article, start=start, end=end, agent=agent)
     rows = cache.cached_call(
@@ -176,12 +188,28 @@ def _fetch_article_monthly(session, project, article, start, end, agent, today=N
 
 
 def _fetch_site_monthly(session, project, start, end, agent, today=None) -> dict:
+    """
+    Site-wide totals, used to normalize an article's share of traffic. An
+    in-range 404 (AmbiguousNoDataError) follows the shared date-aware
+    policy (_is_recent_range): for a recent range it's left to propagate --
+    the caller (run_analyze) marks that language "no_data" rather than this
+    function fabricating a site total that may simply be pending, not
+    genuinely zero (a real wiki's site-wide total is essentially never
+    actually zero, unlike a specific article or redirect). For an older,
+    fully-in-range range it's treated as zero, same as
+    _fetch_redirect_monthly_or_zero.
+    """
     key = cache.cache_key(fn="aggregate", project=project, start=start, end=end, agent=agent)
-    rows = cache.cached_call(
-        key,
-        lambda: api_client.get_pageviews_aggregate(session, project, start, end, agent=agent),
-        max_age_seconds=_max_age_for_range(end, today),
-    )
+    try:
+        rows = cache.cached_call(
+            key,
+            lambda: api_client.get_pageviews_aggregate(session, project, start, end, agent=agent),
+            max_age_seconds=_max_age_for_range(end, today),
+        )
+    except api_client.AmbiguousNoDataError:
+        if _is_recent_range(end, today):
+            raise
+        return {month: 0 for month in _month_range(start, end)}
     return metrics.to_series(rows)
 
 
@@ -193,16 +221,21 @@ def _resolve_cached(session, source_project: str, topic: str, target_langs: list
 def _fetch_redirect_monthly_or_zero(session, project, article, start, end, agent, today=None) -> dict:
     """
     Like _fetch_article_monthly, but an in-range 404 (AmbiguousNoDataError)
-    is treated as zero views for every month instead of raising -- one
-    obscure alternate title having no recorded traffic isn't reason to lose
-    the rest of the topic's real traffic counted under its main title, and
-    the API's own 404 is ambiguous (zero views vs. not-yet-loaded) anyway,
-    so "probably close to zero" is a reasonable reading for a redirect
-    specifically (see api_client.AmbiguousNoDataError's docstring).
+    follows the shared date-aware policy (_is_recent_range) instead of
+    always raising: for an older, fully-in-range range it's treated as zero
+    for every month -- one obscure alternate title having no recorded
+    traffic isn't reason to lose the rest of the topic's real traffic
+    counted under its main title. For a RECENT range it's left to
+    propagate instead (the caller marks the whole language "no_data"),
+    since Wikimedia's own 404 there is ambiguous -- it may mean genuinely
+    zero views, or just that the data isn't loaded yet -- and silently
+    reporting zero would misrepresent traffic that simply hasn't landed.
     """
     try:
         return _fetch_article_monthly(session, project, article, start, end, agent, today)
     except api_client.AmbiguousNoDataError:
+        if _is_recent_range(end, today):
+            raise
         return {month: 0 for month in _month_range(start, end)}
 
 
@@ -341,10 +374,15 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         redirects_capped = len(all_redirects) > MAX_REDIRECTS_PER_LANGUAGE
         try:
             article_monthly = _topic_monthly(session, lang, title, reference_start, end, agent, all_redirects, today)
-        except api_client.AmbiguousNoDataError:
-            # The MAIN article's own 404 (not a redirect's -- see
-            # _topic_monthly) -- mark only this language "no_data" and move
-            # on, rather than aborting every other requested language.
+            site_monthly = _fetch_site_monthly(session, project, reference_start, end, agent, today)
+        except api_client.AmbiguousNoDataError as exc:
+            # Either the main article's own 404 (see _topic_monthly -- a
+            # redirect's 404 doesn't reach here, it's absorbed as zero
+            # inside _topic_monthly) or the site aggregate's, for a RECENT
+            # range only (see _fetch_site_monthly -- an older range is
+            # already handled as zero in there and never raises). Either
+            # way: mark only this language "no_data" and move on, rather
+            # than aborting every other requested language.
             results.append(
                 {
                     "lang": lang,
@@ -358,11 +396,10 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
                     "significant": False,
                     "trend_test": None,
                     "confidence": "low",
-                    "reason": "no pageview data returned for the main article in the requested range (ambiguous 404 -- may mean zero views or data not yet loaded, not proof there is none)",
+                    "reason": f"no pageview data returned in the requested range (ambiguous 404 -- may mean zero views or data not yet loaded, not proof there is none): {exc}",
                 }
             )
             continue
-        site_monthly = _fetch_site_monthly(session, project, reference_start, end, agent, today)
 
         spike_months_all, seasonal_months_all = metrics.classify_spikes_and_seasonal(article_monthly)
         spike_free = metrics.spike_free_series(article_monthly, spike_months_all)

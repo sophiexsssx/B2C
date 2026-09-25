@@ -26,7 +26,7 @@ import pytest
 import requests
 
 import cli
-from wiki_interest import cache
+from wiki_interest import api_client, cache
 from wiki_interest.api_client import PAGEVIEWS_BASE, WIKIDATA_API
 
 RESPONSE_BYTE_LIMIT = cli.RESPONSE_BYTE_LIMIT
@@ -622,3 +622,68 @@ def test_report_summary_override_is_not_persisted_to_the_cached_run(requests_moc
 
     saved = cache.load_run_data(run_id)
     assert "summary" not in saved
+
+
+# ---------------------------------------------------------------------------
+# 15. Site-aggregate 404 follows the same date-aware policy as a redirect's,
+#     and doesn't abort run_analyze's per-language loop
+# ---------------------------------------------------------------------------
+
+
+def _mock_404_for_aggregate(requests_mock, project: str):
+    """Like _mock_404_for_article, but for the site-aggregate endpoint (no article path segment)."""
+    pattern = re.compile(re.escape(f"{PAGEVIEWS_BASE}/aggregate/{project}/") + r"[^/]+/[^/]+/monthly/.*")
+    requests_mock.get(pattern, status_code=404, json={"detail": "not found", "status": 404})
+
+
+def test_is_recent_range_matches_is_current_month():
+    today = datetime(2026, 9, 24, tzinfo=timezone.utc)
+
+    assert cli._is_recent_range("2026-09", today) is True
+    assert cli._is_recent_range("2026-08", today) is False
+
+
+def test_fetch_site_monthly_404_on_older_range_is_treated_as_zero(requests_mock, session):
+    _mock_404_for_aggregate(requests_mock, "de.wikipedia")
+
+    result = cli._fetch_site_monthly(session, "de.wikipedia", "2020-01", "2020-12", "user")
+
+    assert len(result) == 12
+    assert all(v == 0 for v in result.values())
+
+
+def test_fetch_site_monthly_404_on_recent_range_propagates(requests_mock, session):
+    today = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    _mock_404_for_aggregate(requests_mock, "de.wikipedia")
+
+    with pytest.raises(api_client.AmbiguousNoDataError):
+        cli._fetch_site_monthly(session, "de.wikipedia", "2026-09", "2026-09", "user", today)
+
+
+def test_fetch_redirect_monthly_or_zero_404_on_recent_range_propagates(requests_mock, session):
+    today = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    _mock_404_for_article(requests_mock, "de.wikipedia", "RedirectAlt")
+
+    with pytest.raises(api_client.AmbiguousNoDataError):
+        cli._fetch_redirect_monthly_or_zero(session, "de.wikipedia", "RedirectAlt", "2026-09", "2026-09", "user", today)
+
+
+def test_site_aggregate_404_on_older_range_does_not_abort_the_language_loop(requests_mock, session):
+    # A real wiki's site total is essentially never actually zero, but this
+    # only tests the "doesn't crash / other languages unaffected" behavior --
+    # the exact numbers _fetch_site_monthly zero-fills to are metrics.py's
+    # concern, not this test's.
+    _mock_resolution(requests_mock, {"de": "ArticleDE", "pl": "ArticlePL"})
+    _mock_pageviews(requests_mock)
+    _mock_404_for_aggregate(requests_mock, "de.wikipedia")
+
+    response = cli.run_analyze("Topic", ["de", "pl"], start="2024-01", end="2024-12", session=session)
+
+    all_results = response["ranked"] + response["unranked"]
+    by_lang = {r["lang"]: r for r in all_results}
+    assert set(by_lang) == {"de", "pl"}
+    # "de"'s site aggregate 404'd but its main article fetched fine -- a
+    # real (non-"no_data") computation comes back, not an aborted language.
+    assert by_lang["de"]["yoy_growth_flag"] != "no_data"
+    assert by_lang["pl"]["yoy_growth_flag"] != "no_data"
+    assert response["missing"] == []
