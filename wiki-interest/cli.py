@@ -383,6 +383,32 @@ def _omitted_note_text(omitted: int) -> str:
     return f"{omitted} result(s) were omitted from this response to stay under the size limit -- see the saved run folder, or narrow --langs, for full detail."
 
 
+def _trim_notes_to_fit(response: dict, byte_limit: int, protect_last: bool = False) -> dict:
+    """
+    Last-resort safety net, called after result entries have already been
+    trimmed: `notes` itself has no size cap of its own -- e.g. dozens of
+    individually-`missing` languages each contribute their own `--article`
+    retry sentence (notes/plan.md never anticipated a list that scales with
+    --langs) -- so ranked/unranked/missing all being empty doesn't
+    guarantee the response fits. Drops notes from the low-priority (end)
+    side until it does, or until only the protected one remains.
+    `protect_last=True` (used once the omission note itself has been
+    appended) keeps THAT note in place and trims the ones before it
+    instead -- in a degenerate case this bad, knowing data was cut at all
+    matters more than any one specific retry hint.
+    """
+    if _json_bytes(response) <= byte_limit:
+        return response
+    response = dict(response)
+    notes = list(response.get("notes", []))
+    protected = notes[-1:] if protect_last and notes else []
+    trimmable = notes[:-1] if protect_last and notes else notes
+    while trimmable and _json_bytes({**response, "notes": trimmable + protected}) > byte_limit:
+        trimmable.pop()
+    response["notes"] = trimmable + protected
+    return response
+
+
 def _add_omitted_note(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict:
     """
     Adds a plain-language note about `_cap_response`'s own omitted count --
@@ -390,7 +416,9 @@ def _add_omitted_note(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> 
     count was computed, so if adding it pushes the response back over
     budget, trim one more entry (same low-priority order as _cap_response:
     ranked, then unranked, then missing) and keep the note's count in sync,
-    repeating until it fits again. A no-op when nothing was omitted.
+    repeating until it fits again. A no-op when nothing was omitted. Falls
+    back to _trim_notes_to_fit (protecting this note) if ranked/unranked/
+    missing are already empty and the response is still over budget.
     """
     if response.get("omitted", 0) <= 0:
         return response
@@ -416,7 +444,7 @@ def _add_omitted_note(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> 
         response["missing"].pop()
         response["omitted"] += 1
         response["notes"][-1] = _omitted_note_text(response["omitted"])
-    return response
+    return _trim_notes_to_fit(response, byte_limit, protect_last=True)
 
 
 def _cap_response(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict:
@@ -427,6 +455,14 @@ def _cap_response(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict
     low-priority end until the response fits `byte_limit` -- notes/plan.md:
     report the top N plus how many were omitted, never silently truncate
     JSON mid-object or return something over budget.
+
+    Trimming those three lists isn't actually sufficient on its own: `notes`
+    can independently grow past `byte_limit` all by itself (e.g. many
+    individually-`missing` languages each carry their own `--article`
+    retry sentence), in which case ranked/unranked/missing all end up
+    empty and the response is STILL over budget -- so the final step here
+    is always _trim_notes_to_fit as a guaranteed catch-all, not just a
+    fallback for an unlikely edge case.
     """
     if _json_bytes(response) <= byte_limit:
         return response
@@ -452,7 +488,7 @@ def _cap_response(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict
     response["unranked"] = unranked
     response["missing"] = missing
     response["omitted"] = omitted
-    return response
+    return _trim_notes_to_fit(response, byte_limit)
 
 
 def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_growth", article_overrides=None, source_lang=DEFAULT_SOURCE_LANG, session=None, today=None) -> dict:

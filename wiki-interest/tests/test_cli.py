@@ -1052,6 +1052,25 @@ def test_notes_flags_omitted_results_for_a_large_language_list(requests_mock, se
     assert str(response["omitted"]) in omission_notes[0]
 
 
+def test_response_stays_under_budget_when_many_languages_are_missing(requests_mock, session):
+    # Every requested language is unresolved -- each one gets its own
+    # --article retry sentence in `notes` (unlike ranked/unranked/missing,
+    # which _cap_response trims, nothing used to cap `notes` itself, so 25
+    # individually-missing languages could push the response over budget
+    # even with every result list already empty).
+    langs = [f"l{i:02d}" for i in range(25)]
+    _mock_resolution(requests_mock, {})  # nothing resolves -- all 25 end up missing
+
+    response = cli.run_analyze("Topic", langs, start="2024-01", end="2024-12", session=session)
+
+    assert _json_bytes(response) <= cli.RESPONSE_BYTE_LIMIT
+    assert response["ranked"] == []
+    assert response["unranked"] == []
+    # notes were trimmed to fit, but the omission note itself survives --
+    # it's the single most important fact to keep in this degenerate case.
+    assert any("omitted" in note.lower() for note in response["notes"])
+
+
 def _monotonic_ramp_items(base=5000, step=20):
     """
     A steadily increasing view count across the whole broad mock range --
