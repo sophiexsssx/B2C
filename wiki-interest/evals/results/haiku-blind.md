@@ -361,11 +361,13 @@ and reflected in the scores below rather than the raw grader output.
 
 **Aggregate** (evals 1/3/6/7/8, excluding eval 8's perpetually-inconclusive
 item, and comparing like-for-like against iteration 1's *after-fix* scores
-under this round's stricter grading): 6+6+4+5+3 = 24/27 (iter. 1, as scored
-originally) vs. 7+5+4+3+3 = 22/27 (iter. 2). The apparent dip is entirely
-the eval 7 grading-strictness change above, not a real behavior regression
--- the underlying omission-relay behavior was identical in both runs and is
-now correctly flagged as open in both.
+under this round's stricter grading): denominators are 8+6+4+5+3 = 26 items
+in both iterations (eval 8 contributes 3 checkable items, not its full 4,
+once the inconclusive one is excluded). 6+6+4+5+3 = 24/26 (iter. 1, as
+scored originally) vs. 7+5+4+3+3 = 22/26 (iter. 2). The apparent dip is
+entirely the eval 7 grading-strictness change above, not a real behavior
+regression -- the underlying omission-relay behavior was identical in both
+runs and is now correctly flagged as open in both.
 
 ### New finding this round: confidence-level framing can drift from the raw data in a business-recommendation write-up
 
