@@ -461,11 +461,13 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
     generate a server-side run_id, save the full result to that run's cache
     folder, and return a compact, size-capped JSON summary (RESPONSE_BYTE_LIMIT) --
     `notes` on the response flags anything the caller needs to relay to the
-    user that isn't obvious from the numbers alone (a borrowed YoY baseline,
-    a clamped end month, capped redirects, an omitted-results count); each
-    per-language `reason` is a shortened summary of the full reason saved
-    to the run folder. See the module docstring for `--topic`/`--source-lang`
-    and the redirect-summing rule.
+    user that isn't obvious from the numbers alone: a borrowed YoY baseline,
+    a clamped end month, capped redirects, low-volume or not-statistically-
+    significant languages, a missing article's `--article lang:"Title"`
+    retry, and an omitted-results count. Each per-language `reason` is a
+    shortened summary of the full reason saved to the run folder. See the
+    module docstring for `--topic`/`--source-lang` and the redirect-summing
+    rule.
     """
     session = session or api_client.build_session()
     source_project = f"{source_lang}.wikipedia"
@@ -498,6 +500,8 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
     results, series, spike_months_out, seasonal_months_out = [], {}, {}, {}
     redirect_capped_langs = []
     base_reason_by_lang = {}
+    low_volume_langs = []
+    not_significant_langs = []
     for lang in langs:
         if lang not in editions:
             if lang not in missing:
@@ -568,6 +572,15 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         if redirects_capped:
             reason = f"{reason}; only the first {MAX_REDIRECTS_PER_LANGUAGE} of {len(all_redirects)} redirects were counted"
             redirect_capped_langs.append(lang)
+        # Tracked for top-level `notes` -- these two confidence factors are
+        # easy to miss buried inside a per-language `reason` string
+        # (especially once _for_response shortens it), so they also get a
+        # blunt, hard-to-miss top-level sentence naming every affected
+        # language, on top of (not instead of) the per-language reason.
+        if avg_views["period_avg"] is not None and avg_views["period_avg"] < metrics.AVG_VIEWS_LOW_THRESHOLD:
+            low_volume_langs.append(lang)
+        if not trend["significant"]:
+            not_significant_langs.append(lang)
 
         period_spikes = sorted(m for m in spike_months_all if start <= m <= end)
         period_seasonal = sorted(m for m in seasonal_months_all if start <= m <= end)
@@ -640,6 +653,12 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         )
     if redirect_capped_langs:
         notes.append(f"Only the first {MAX_REDIRECTS_PER_LANGUAGE} redirects were counted for: {', '.join(sorted(redirect_capped_langs))}.")
+    if low_volume_langs:
+        notes.append(f"Average interest is low for: {', '.join(sorted(low_volume_langs))} -- their growth percentages are noisier and less reliable than a higher-traffic result's.")
+    if not_significant_langs:
+        notes.append(f"The trend is not statistically significant for: {', '.join(sorted(not_significant_langs))} -- treat their growth direction as provisional, not a confirmed trend.")
+    for lang in missing:
+        notes.append(f'No article found for this topic on {lang} Wikipedia -- it may exist under another title; retry with --article {lang}:"<correct title>".')
 
     response = {
         "run_id": run_id,

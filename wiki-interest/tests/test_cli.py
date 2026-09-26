@@ -877,12 +877,19 @@ def test_saved_results_are_rank_ordered_not_alphabetical(requests_mock, session)
 
     from wiki_interest.api_client import PAGEVIEWS_BASE
 
-    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/aa\.wikipedia/.*"), json={"items": _broad_items(50)})
-    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/mm\.wikipedia/.*"), json={"items": _broad_items(5000)})
-    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/zz\.wikipedia/.*"), json={"items": _broad_items(500)})
-    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/aggregate/.*"), json={"items": _broad_items(100000)})
+    # View counts well above the low-volume threshold (300) and a full
+    # 24-month period (not a short-period baseline-borrowing case) --
+    # neither the low-volume nor the borrowed-baseline `notes` entries
+    # should apply here, so this test's own 3-language response stays
+    # comfortably under budget and isn't capped by _cap_response, which
+    # would otherwise make this structural assertion fail for an unrelated
+    # reason (a real, and separately tested, side effect of adding notes).
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/aa\.wikipedia/.*"), json={"items": _broad_items(5000)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/mm\.wikipedia/.*"), json={"items": _broad_items(500000)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/zz\.wikipedia/.*"), json={"items": _broad_items(50000)})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/aggregate/.*"), json={"items": _broad_items(10000000)})
 
-    response = cli.run_analyze("Topic", ["aa", "mm", "zz"], start="2024-01", end="2024-12", session=session)
+    response = cli.run_analyze("Topic", ["aa", "mm", "zz"], start="2024-01", end="2025-12", session=session)
 
     saved = cache.load_run_data(response["run_id"])
     saved_lang_order = [r["lang"] for r in saved["results"]]
@@ -895,6 +902,7 @@ def test_saved_results_are_rank_ordered_not_alphabetical(requests_mock, session)
     # used, not a re-derived or different order -- assert that equality
     # directly, which is what actually catches a regression back to raw
     # insertion order if that concatenation is ever dropped.
+    assert response["omitted"] == 0  # otherwise the concatenation below wouldn't cover all 3 languages either
     assert saved_lang_order == [r["lang"] for r in response["ranked"]] + [r["lang"] for r in response["unranked"]]
     assert saved.get("rank_by") == "yoy_growth"
 
@@ -1044,12 +1052,103 @@ def test_notes_flags_omitted_results_for_a_large_language_list(requests_mock, se
     assert str(response["omitted"]) in omission_notes[0]
 
 
+def _monotonic_ramp_items(base=5000, step=20):
+    """
+    A steadily increasing view count across the whole broad mock range --
+    unlike the module's flat `_broad_items`, this produces a genuine,
+    statistically significant upward trend (every calendar month's value
+    increases year over year) while staying well above the low-volume
+    threshold throughout -- the "nothing to flag" case needs a real trend,
+    not just high views, since a flat series is never significant.
+    """
+    items = []
+    year, month = 2015, 7
+    i = 0
+    while (year, month) <= (2028, 12):
+        items.append({"timestamp": f"{year:04d}{month:02d}0100", "views": base + i * step})
+        i += 1
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return items
+
+
 def test_notes_is_empty_list_when_nothing_needs_flagging(requests_mock, session):
     _mock_resolution(requests_mock, {"de": "Thema"})
-    _mock_pageviews(requests_mock)
+    ramp = _monotonic_ramp_items()
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/per-article/.*"), json={"items": ramp})
+    requests_mock.get(re.compile(re.escape(PAGEVIEWS_BASE) + r"/aggregate/.*"), json={"items": [{"timestamp": item["timestamp"], "views": 1000000} for item in ramp]})
 
     # A full 24-month period (not "short"), no clamping, no capped redirects,
-    # not enough languages to trigger omission -- nothing here should need flagging.
+    # a genuinely significant trend, high volume throughout, and not enough
+    # languages to trigger omission -- nothing here should need flagging.
     response = cli.run_analyze("Topic", ["de"], start="2024-01", end="2025-12", session=session)
 
+    result = (response["ranked"] + response["unranked"])[0]
+    assert result["significant"] is True  # sanity check: this is genuinely the "nothing wrong" case, not an accidental flat one
     assert response["notes"] == []
+
+
+def test_notes_flags_low_volume_languages(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema"})
+    _mock_pageviews(requests_mock, article_views=100)  # well under AVG_VIEWS_LOW_THRESHOLD (300)
+
+    response = cli.run_analyze("Topic", ["de"], start="2024-01", end="2025-12", session=session)
+
+    low_volume_notes = [note for note in response["notes"] if "low" in note.lower()]
+    assert len(low_volume_notes) == 1
+    assert "de" in low_volume_notes[0]
+
+
+def test_notes_flags_not_significant_languages(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema"})
+    _mock_pageviews(requests_mock)  # uniform views -- flat, never a significant trend
+
+    response = cli.run_analyze("Topic", ["de"], start="2024-01", end="2025-12", session=session)
+
+    result = (response["ranked"] + response["unranked"])[0]
+    assert result["significant"] is False
+    significance_notes = [note for note in response["notes"] if "significant" in note.lower()]
+    assert len(significance_notes) == 1
+    assert "de" in significance_notes[0]
+
+
+def test_notes_flags_multiple_low_volume_or_insignificant_languages_together(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema", "pl": "Temat"})
+    _mock_pageviews(requests_mock)  # uniform + low-volume for both languages
+
+    response = cli.run_analyze("Topic", ["de", "pl"], start="2024-01", end="2025-12", session=session)
+
+    low_volume_notes = [note for note in response["notes"] if "low" in note.lower()]
+    significance_notes = [note for note in response["notes"] if "significant" in note.lower()]
+    assert len(low_volume_notes) == 1 and "de" in low_volume_notes[0] and "pl" in low_volume_notes[0]
+    assert len(significance_notes) == 1 and "de" in significance_notes[0] and "pl" in significance_notes[0]
+
+
+def test_notes_flags_missing_article_with_a_concrete_article_retry(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema"})  # "xx" covered by nobody
+    _mock_pageviews(requests_mock)
+
+    response = cli.run_analyze("Topic", ["de", "xx"], start="2024-01", end="2024-12", session=session)
+
+    assert response["missing"] == ["xx"]
+    retry_notes = [note for note in response["notes"] if "xx" in note]
+    assert len(retry_notes) == 1
+    # The exact CLI syntax an agent needs, not just a vague "not found" --
+    # this is what M6's blind eval found real Haiku runs never surfaced on
+    # their own even when SKILL.md asked them to.
+    assert '--article xx:"' in retry_notes[0]
+
+
+def test_notes_has_one_retry_entry_per_missing_language(requests_mock, session):
+    _mock_resolution(requests_mock, {"de": "Thema"})  # "xx" and "yy" both unresolved
+    _mock_pageviews(requests_mock)
+
+    response = cli.run_analyze("Topic", ["de", "xx", "yy"], start="2024-01", end="2024-12", session=session)
+
+    assert set(response["missing"]) == {"xx", "yy"}
+    retry_notes = [note for note in response["notes"] if "--article" in note]
+    assert len(retry_notes) == 2
+    assert any("xx" in note for note in retry_notes)
+    assert any("yy" in note for note in retry_notes)
