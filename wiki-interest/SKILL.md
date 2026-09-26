@@ -51,13 +51,15 @@ costs extra calls without adding information you don't already have.
 country names or domain suffixes -- a request phrased around a country
 needs translating to the right edition first:
 
-- `uk` = **Ukrainian**. **The United Kingdom's own Wikipedia is English --
-  use `en` for "the UK", never `uk`.** This is a real, easy mix-up in
-  English text ("uk and pl" reads naturally as "the United Kingdom and
-  Poland" even though `uk` is Ukrainian's code) -- when a request names a
-  country rather than a language, translate it to that country's actual
-  language edition(s) instead of pattern-matching the country's usual
-  abbreviation onto a language code.
+- `uk` = **Ukrainian Wikipedia**. **There is no "United Kingdom" Wikipedia
+  -- English (`en`) is Wikipedia's global edition, and that's what covers
+  the UK.** This is a real, easy mix-up in English text ("uk and pl" reads
+  naturally as "the United Kingdom and Poland" even though `uk` is
+  Ukrainian's code) -- if a request could plausibly mean the country,
+  **say so explicitly in your answer** (e.g. "I've used `en`, since
+  Wikipedia doesn't have a UK-specific edition -- let me know if you meant
+  Ukrainian") rather than silently picking one reading. Never use `uk` for
+  "the UK".
 - Other common codes: `en` English, `de` German, `fr` French, `es` Spanish,
   `pt` Portuguese, `ru` Russian, `pl` Polish, `cs` Czech, `nl` Dutch, `sv`
   Swedish, `tr` Turkish, `it` Italian, `el` Greek, `ja` Japanese, `zh`
@@ -72,11 +74,13 @@ needs translating to the right edition first:
   (default English). If the user names a topic in another language, either
   translate it or pass `--source-lang` instead of guessing a translation.
 - **`--langs`**: comma-separated codes -- see "Language codes" above. If
-  the user hasn't actually named which languages, don't guess a default
-  list -- either ask, or state up front, before running anything, which
-  languages you're about to use and why (never decide silently and only
-  mention it afterward). This still applies when you stop to ask: ask in
-  the same language the user wrote in, not English.
+  the user hasn't actually named which languages, don't stop to ask --
+  proceed with a sensible default set (e.g. a handful of major and/or
+  clearly relevant editions for the request), then state up front, before
+  showing any numbers, which languages you picked and why, and offer to
+  rerun with different ones. Never decide silently and only reveal the
+  choice after the fact -- the "state it up front" part is what makes a
+  default acceptable instead of a guess.
 - **Period**: omit `--start`/`--end` for the default (last 24 complete
   months) -- e.g. "last two years" needs nothing extra. Always pass both or
   neither; one without the other is rejected. `YYYY-MM` is the format
@@ -101,21 +105,23 @@ compare against, often the most interesting finding, not one to bury;
 `no_data`: Wikimedia returned nothing for this range, possibly just not
 loaded yet). `missing`: no matching article at all -- a content gap, not an
 error. **Say so explicitly in your final answer** (don't just silently skip
-that language): the article may exist under a different title, so offer a
-specific next step -- retry `analyze` with `--article <lang>:"<correct
-title>"`, or check first with `resolve --article "<title>" --langs <lang>`.
-A bare "not found" isn't enough; name the concrete retry. `omitted`: how
-many low-priority results were cut to keep the response small -- point the
-user to the Markdown report for the full table instead of listing
-everything yourself.
+that language) -- `notes` already gives you the exact retry to offer (the
+next paragraph), so you don't need to construct the `--article` syntax
+yourself; just relay it. `omitted`: how many low-priority results were cut
+to keep the response small -- point the user to the Markdown report for the
+full table instead of listing everything yourself.
 
 `notes`: a list of plain-language sentences (possibly empty) flagging
-anything you need to know that isn't obvious from the numbers alone -- e.g.
-a borrowed year-over-year baseline for a short period, an end date that got
-clamped to the last complete month, redirects that were capped, or results
-that were omitted to stay under the size limit. **Always pass every item in
-`notes` on to the user** -- these are facts they need, not internal/optional
-detail you can decide to skip.
+anything you need to know that isn't obvious from the numbers alone -- a
+borrowed year-over-year baseline for a short period, an end date that got
+clamped to the last complete month, capped redirects, low-volume or
+not-statistically-significant languages, a ready-to-use `--article
+<lang>:"<correct title>"` retry for each language in `missing`, or results
+omitted to stay under the size limit. **Always pass every item in `notes`
+on to the user, in your own words** -- these are facts they need, not
+internal/optional detail you can decide to skip, and for `missing` in
+particular, relaying the `notes` entry verbatim (as the concrete retry
+syntax) is more useful to the user than paraphrasing it away.
 
 Every result carries `confidence` and `reason`, and a `significant` flag.
 Never quote these fields' raw names or values back at the user -- translate
@@ -131,24 +137,25 @@ retry once; don't loop on the same call unchanged.
 
 ## Your final answer
 
-Regardless of language, structure it as:
-1. **Direct answer** to what was asked (growing/declining/flat, in which
+Structure it as:
+1. **Answer in the language the user wrote in.** This is the first rule,
+   before anything about content -- it applies to every message you send
+   them, including a stated-default-languages note or an offer to adjust,
+   not just a polished final summary.
+2. **Direct answer** to what was asked (growing/declining/flat, in which
    languages).
-2. **For EACH language** in `ranked` and `unranked` alike (not just the
+3. **For EACH language** in `ranked` and `unranked` alike (not just the
    headline one): its growth direction/rate, whether the trend is
    statistically significant, and its confidence level with the
    plain-language reason. Don't blend multiple languages into one summary
    statement -- a reader comparing languages needs each one's own numbers.
-3. **Every item in `notes`**, passed on in your own words -- never skipped.
-4. **A concrete next step**: what to check to validate further (a longer
+4. **Every item in `notes`**, passed on in your own words (or verbatim for
+   a `--article` retry, see "Reading the response" above) -- never
+   skipped.
+5. **A concrete next step**: what to check to validate further (a longer
    window, another language, a manual `resolve`, etc.) -- not just "trust
-   this." If any language came back `missing`, this is where its specific
-   retry (`--article <lang>:"<correct title>"`) belongs if you haven't
-   already offered it.
-5. **Report file paths** (PDF/PNG/Markdown), so the user can share them.
-
-Answer in the same language the user asked in -- including a clarifying
-question you ask *before* running anything, not just the final answer.
+   this."
+6. **Report file paths** (PDF/PNG/Markdown), so the user can share them.
 
 ## What this skill will never do
 
