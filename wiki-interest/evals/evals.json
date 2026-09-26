@@ -38,11 +38,11 @@
         "Ми створюємо застосунок для вивчення мов. Порівняй інтерес до вивчення англійської у вибраних нами мовних розділах та підготуй короткий звіт: які аудиторії варто дослідити наступними й чому?",
         "Польська, турецька, румунська та в'єтнамська."
       ],
-      "notes": "Assignment example prompt 3, now two-turn (M6 fix round). Turn 1 still does NOT name which language editions ('вибраних нами' = 'our chosen ones') -- a deliberate ambiguity to check the skill asks rather than guesses. The M6 pilot run stopped there (asked a clarifying question, correctly) but never got to exercise the actual recommendation this eval is really about, and answered turn 1 in English despite the Ukrainian prompt -- turn 2 supplies the languages (pl, tr, ro, vi) so this eval can check both: the language-matching fix, and the part of the eval that was never reached before.",
+      "notes": "Assignment example prompt 3, two-turn. Turn 1 still does NOT name which language editions ('вибраних нами' = 'our chosen ones') -- a deliberate ambiguity. SKILL.md's guidance on this reversed in a later M6 iteration: it used to say ask-or-state-then-proceed; it now says never stop to ask -- proceed with a sensible default, state which and why, offer to adjust. Turn 2 (still 'Польська, турецька, румунська та в'єтнамська') is now read as the user OVERRIDING that default rather than answering a clarifying question -- the eval still exercises a real recommendation either way, just via a different turn-1 mechanism.",
       "expect": [
-        "Turn 1: recognizes --langs isn't actually specified by the user, and asks a clarifying question BEFORE running anything -- in Ukrainian, the language the user wrote in, not English",
-        "Turn 1: makes no cli.py calls (nothing to analyze yet without knowing which languages)",
-        "Turn 2: calls analyze with --topic identifying English-language learning and --langs covering pl, tr, ro, vi (or their equivalent codes), then report -- 2 cli.py calls",
+        "Turn 1: recognizes --langs isn't actually specified by the user, and proceeds with a sensible default set of languages rather than stopping to ask -- states up front which languages it picked and why, and offers to rerun with different ones",
+        "Turn 1: calls analyze then report for the default set it chose -- 2 cli.py calls",
+        "Turn 2: treats the four named languages as the user overriding the default -- re-runs analyze with --langs covering pl, tr, ro, vi (or their equivalent codes), then report -- 2 more cli.py calls",
         "Turn 2's final answer goes beyond reporting raw growth numbers: it recommends which audience(s)/language(s) are worth investigating next, with a stated reason drawn from the data (e.g. highlighting a significant grower, or an emerging/new_or_dormant language with no baseline yet as worth a closer look)",
         "Does not present the recommendation as more certain than the underlying confidence levels support",
         "Both turns' answers are written in Ukrainian (the language the user asked in), not English"
@@ -110,6 +110,19 @@
         "Turn 2: re-runs analyze with --langs expanded to include de (uk, pl, and de all present) and --rank-by avg_monthly_views, rather than only fetching German in isolation or ignoring the re-rank request",
         "Turn 2 does not write or execute any custom script/code to sort or filter results itself -- ranking is done via the CLI's own --rank-by, not hand-rolled logic",
         "Across both turns, no data already fetched in turn 1 (uk, pl for the same date range) needs to be re-downloaded from Wikimedia -- the existing per-article/per-range disk cache means turn 2's added network cost is limited to the new language (de) and whatever site-aggregate/resolution calls are genuinely new"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "large-language-list-omission-relay",
+      "prompt": "We're evaluating a global content strategy. Compare interest in \"Coffee\" across at least 30 Wikipedia language editions and tell us which single market you'd prioritize first, and why.",
+      "notes": "A dedicated, distinct-topic omission stress test (separate from eval 7's Yoga/language-learning framing) added specifically because eval 7's real 33-language run DID trigger omission and handled it well in substance (read the full report, never answered from incomplete data) but never actually relayed the omitted-count `notes` entry to the user, verbatim or paraphrased -- this eval's expect list presses on exactly that gap.",
+      "expect": [
+        "Calls analyze with --langs containing at least 30 language codes",
+        "If the analyze response's omitted count is nonzero, the final answer explicitly tells the user that some results were left out of the initial response (the model's own words are fine, but it must actually say so) -- not just silently compensated for by reading the full report without ever mentioning it",
+        "Does not fabricate or guess a number for any language it didn't actually get real data for",
+        "States one specific top-priority market with a data-grounded reason (a real number or trend from the response or report), not a vague 'many good options' non-answer",
+        "Total cli.py calls stay low (2, or a small constant number) -- does not call analyze once per language"
       ]
     }
   ]
