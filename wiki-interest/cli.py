@@ -4,7 +4,8 @@ CLI entrypoint for the wiki-interest skill: `analyze`, `report`, `resolve`.
 Target caller is an agent (Claude Haiku 4.5, notes/requirements.md), not a
 human typing commands -- every subcommand prints one compact JSON object to
 stdout and nothing else. A basic question is exactly 2 calls: `analyze`
-(fetches, computes metrics, caches full results, returns a <=2KB summary)
+(fetches, computes metrics, caches full results, returns a compact,
+size-capped JSON summary)
 then `report` (reads the cached run, renders PDF/PNG/Markdown, returns file
 paths + a one-line headline). `resolve` is optional -- a manual pre-check,
 never required on the default path.
@@ -43,7 +44,13 @@ from wiki_interest import api_client, cache, metrics, resolve as resolve_mod  # 
 from wiki_interest import report as report_mod  # noqa: E402
 
 DEFAULT_SOURCE_LANG = "en"
-RESPONSE_BYTE_LIMIT = 2048
+RESPONSE_BYTE_LIMIT = 1800
+# Per-language `reason` strings can run long once compute_confidence joins
+# several factors with "; " -- the full text is always saved to the run
+# folder (report.py reads it from there), only the JSON response shortens
+# it, so a many-language request doesn't burn most of its byte budget on
+# reason prose instead of actual per-language numbers.
+SHORT_REASON_MAX_CHARS = 100
 # Only a range that reaches the current in-progress month needs a short
 # cache TTL (metrics.is_current_month) -- see cache.get_cached_json's
 # docstring for why a finalized month caches forever.
@@ -87,6 +94,25 @@ def _month_range(start: str, end: str) -> list:
 
 
 _YYYYMM_RE = re.compile(r"\A[0-9]{4}-(0[1-9]|1[0-2])\Z")
+_YYYYMMDD_RE = re.compile(r"\A([0-9]{4}-(?:0[1-9]|1[0-2]))-(?:0[1-9]|[12][0-9]|3[01])\Z")
+
+
+def _normalize_month_input(value: str) -> str:
+    """
+    "2026-04-01" -> "2026-04"; "2026-04" -> "2026-04" (unchanged).
+
+    --start/--end only ever mean a MONTH, but an agent reasoning about "the
+    last 6 months" naturally thinks in calendar dates and may pass a full
+    YYYY-MM-DD (real observed Haiku behavior, M6 eval 6: it guessed
+    "2026-04-01", got the CLI's own rejection, and had to retry) -- the day
+    component carries no information either --start or --end ever use, so
+    silently dropping it here is strictly more useful than forcing that
+    retry. Anything that isn't a full YYYY-MM-DD is passed through
+    unchanged for _validate_yyyymm to accept or reject as usual -- this
+    never widens what a plain "YYYY-MM" input already accepts.
+    """
+    match = _YYYYMMDD_RE.match(value)
+    return match.group(1) if match else value
 
 
 def _validate_yyyymm(label: str, value: str) -> None:
@@ -110,12 +136,16 @@ def _validate_yyyymm(label: str, value: str) -> None:
 def _validate_and_normalize_period(start: str, end: str, today=None) -> tuple:
     """
     (start, end, note): raises ValueError for a non-canonical start/end or
-    for start > end. If `end` is the current or a future month, clamps it
+    for start > end. `start`/`end` are first passed through
+    _normalize_month_input, so a full "YYYY-MM-DD" is accepted and reduced
+    to its month. If `end` is the current or a future month, clamps it
     to the last complete month instead of silently mixing a partial
     in-progress count into every growth calculation -- `note` explains the
     clamp so the agent isn't surprised the returned period differs from
     what it asked for; None if untouched.
     """
+    start = _normalize_month_input(start)
+    end = _normalize_month_input(end)
     _validate_yyyymm("--start", start)
     _validate_yyyymm("--end", end)
     if start > end:
@@ -306,6 +336,89 @@ def _json_bytes(obj) -> int:
     return len(json.dumps(obj, separators=(",", ":")).encode("utf-8"))
 
 
+def _shorten_reason(reason: str, max_chars: int = SHORT_REASON_MAX_CHARS) -> str:
+    """
+    The full `reason` (unchanged, saved to the run folder via run_data) cut
+    to a plain-language summary for the JSON response -- at the last whole
+    word within `max_chars`, not mid-word, so a many-language response
+    doesn't burn its byte budget on reason prose, and doesn't produce a
+    garbled partial word either.
+    """
+    if len(reason) <= max_chars:
+        return reason
+    truncated = reason[:max_chars].rsplit(" ", 1)[0]
+    return f"{truncated}…"
+
+
+def _for_response(entries: list, base_reason_by_lang: dict = None) -> list:
+    """
+    Shallow copies of `entries` with a shortened `reason` -- never mutates
+    the originals (still referenced by run_data, already saved). Shortens
+    only the BASE confidence reason (`base_reason_by_lang[lang]`, the value
+    metrics.compute_confidence returned before run_analyze appended any
+    match-confidence/redirect-cap addendum) and keeps whatever was appended
+    after it intact -- so a long base reason never crowds out an addendum
+    that matters (e.g. "manually specified via --article") just because it
+    happened to come last. Falls back to shortening the whole `reason`
+    verbatim when there's no tracked base for that language (e.g. the
+    no_data early-return case, which never has an addendum anyway).
+    """
+    base_reason_by_lang = base_reason_by_lang or {}
+    shortened = []
+    for entry in entries:
+        if "reason" not in entry:
+            shortened.append(entry)
+            continue
+        base = base_reason_by_lang.get(entry.get("lang"))
+        if base is not None and entry["reason"].startswith(base):
+            addendum = entry["reason"][len(base) :]
+            reason = _shorten_reason(base) + addendum
+        else:
+            reason = _shorten_reason(entry["reason"])
+        shortened.append(dict(entry, reason=reason))
+    return shortened
+
+
+def _omitted_note_text(omitted: int) -> str:
+    return f"{omitted} result(s) were omitted from this response to stay under the size limit -- see the saved run folder, or narrow --langs, for full detail."
+
+
+def _add_omitted_note(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict:
+    """
+    Adds a plain-language note about `_cap_response`'s own omitted count --
+    but the note itself costs bytes that weren't accounted for when that
+    count was computed, so if adding it pushes the response back over
+    budget, trim one more entry (same low-priority order as _cap_response:
+    ranked, then unranked, then missing) and keep the note's count in sync,
+    repeating until it fits again. A no-op when nothing was omitted.
+    """
+    if response.get("omitted", 0) <= 0:
+        return response
+    response = dict(response)
+    response["ranked"] = list(response["ranked"])
+    response["unranked"] = list(response["unranked"])
+    response["missing"] = list(response.get("missing", []))
+    response["notes"] = list(response.get("notes", []))
+    response["notes"].append(_omitted_note_text(response["omitted"]))
+
+    def _fits() -> bool:
+        return _json_bytes(response) <= byte_limit
+
+    while not _fits() and response["ranked"]:
+        response["ranked"].pop()
+        response["omitted"] += 1
+        response["notes"][-1] = _omitted_note_text(response["omitted"])
+    while not _fits() and response["unranked"]:
+        response["unranked"].pop()
+        response["omitted"] += 1
+        response["notes"][-1] = _omitted_note_text(response["omitted"])
+    while not _fits() and response["missing"]:
+        response["missing"].pop()
+        response["omitted"] += 1
+        response["notes"][-1] = _omitted_note_text(response["omitted"])
+    return response
+
+
 def _cap_response(response: dict, byte_limit: int = RESPONSE_BYTE_LIMIT) -> dict:
     """
     Trim `ranked`, then (only if that alone still isn't enough) `unranked`,
@@ -346,8 +459,13 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
     """
     Resolve every language internally (cached), fetch+compute metrics,
     generate a server-side run_id, save the full result to that run's cache
-    folder, and return a <=2KB summary. See the module docstring for
-    `--topic`/`--source-lang` and the redirect-summing rule.
+    folder, and return a compact, size-capped JSON summary (RESPONSE_BYTE_LIMIT) --
+    `notes` on the response flags anything the caller needs to relay to the
+    user that isn't obvious from the numbers alone (a borrowed YoY baseline,
+    a clamped end month, capped redirects, an omitted-results count); each
+    per-language `reason` is a shortened summary of the full reason saved
+    to the run folder. See the module docstring for `--topic`/`--source-lang`
+    and the redirect-summing rule.
     """
     session = session or api_client.build_session()
     source_project = f"{source_lang}.wikipedia"
@@ -378,6 +496,8 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
         redirects_by_lang[lang] = cache.cached_call(key, lambda p=project, t=title: api_client.get_redirects(session, p, t))
 
     results, series, spike_months_out, seasonal_months_out = [], {}, {}, {}
+    redirect_capped_langs = []
+    base_reason_by_lang = {}
     for lang in langs:
         if lang not in editions:
             if lang not in missing:
@@ -437,10 +557,17 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
             significance_insufficient_data=trend["insufficient_data"],
             avg_monthly_views=avg_views["period_avg"],
         )
+        # Tracked separately from `reason` below, which goes on to accumulate
+        # the match-confidence/redirect-cap addenda -- _for_response shortens
+        # THIS base reason for the JSON response, not the combined one, so a
+        # long base reason never crowds out an addendum that matters (e.g. a
+        # manually-overridden match) just because it happened to come last.
+        base_reason_by_lang[lang] = reason
         if lang_match_confidence != "high":
             reason = f"{reason}; {lang_match_reason}"
         if redirects_capped:
             reason = f"{reason}; only the first {MAX_REDIRECTS_PER_LANGUAGE} of {len(all_redirects)} redirects were counted"
+            redirect_capped_langs.append(lang)
 
         period_spikes = sorted(m for m in spike_months_all if start <= m <= end)
         period_seasonal = sorted(m for m in seasonal_months_all if start <= m <= end)
@@ -501,15 +628,30 @@ def run_analyze(topic, langs, start=None, end=None, agent="user", rank_by="yoy_g
     response_period = {"start": start, "end": end, "reference_months_before": period["reference_months_before"], "reference_reason": period["reference_reason"]}
     if period_note:
         response_period["note"] = period_note
+
+    notes = []
+    if period_note:
+        notes.append(period_note)
+    if period["used_reference_baseline_for_yoy"]:
+        notes.append(
+            f"The year-over-year comparison's baseline for this period includes "
+            f"{period['reference_months_before']} extra month(s) of history before "
+            f"{start}, since the requested period is under {metrics.SHORT_PERIOD_MONTHS} months."
+        )
+    if redirect_capped_langs:
+        notes.append(f"Only the first {MAX_REDIRECTS_PER_LANGUAGE} redirects were counted for: {', '.join(sorted(redirect_capped_langs))}.")
+
     response = {
         "run_id": run_id,
         "period": response_period,
-        "ranked": ranked,
-        "unranked": unranked,
+        "ranked": _for_response(ranked, base_reason_by_lang),
+        "unranked": _for_response(unranked, base_reason_by_lang),
         "missing": missing,
         "omitted": 0,
+        "notes": notes,
     }
-    return _cap_response(response)
+    response = _cap_response(response)
+    return _add_omitted_note(response)
 
 
 # ---------------------------------------------------------------------------
@@ -610,8 +752,8 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--topic", required=True, help='A --source-lang Wikipedia article title, e.g. "Intermittent fasting".')
     analyze.add_argument("--langs", required=True, type=_split_langs, help="Comma-separated language codes, e.g. pl,cs.")
     analyze.add_argument("--source-lang", default=DEFAULT_SOURCE_LANG, dest="source_lang", help='Language --topic itself is written in (default "en").')
-    analyze.add_argument("--start", default=None, help="YYYY-MM. Omit with --end to default to the last 24 complete months.")
-    analyze.add_argument("--end", default=None, help="YYYY-MM. Omit with --start to default to the last 24 complete months. The current/a future month is clamped to the last complete one.")
+    analyze.add_argument("--start", default=None, help="YYYY-MM (a full YYYY-MM-DD is also accepted; the day is dropped). Omit with --end to default to the last 24 complete months.")
+    analyze.add_argument("--end", default=None, help="YYYY-MM (a full YYYY-MM-DD is also accepted; the day is dropped). Omit with --start to default to the last 24 complete months. The current/a future month is clamped to the last complete one.")
     # Limited to the two values notes/api.md actually verified against the
     # live API ("user" is this skill's own default; "all-agents" is the
     # only other value exercised there) -- not the wider Wikimedia enum
