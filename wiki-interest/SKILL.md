@@ -44,6 +44,12 @@ You don't need to open the generated report files -- the `analyze` and
 numbers from `analyze`, the file paths from `report`). Just give the user
 the file paths `report` returns; opening the PDF/PNG/Markdown yourself only
 costs extra calls without adding information you don't already have.
+**Exception**: if `omitted` is nonzero and the capped `ranked`/`unranked`
+lists don't actually cover what the user asked for (e.g. they want a top 3
+and fewer than 3 survived capping), read the generated Markdown report --
+it always has the full, uncapped per-language table -- rather than
+answering from an incomplete response or guessing at languages you have no
+real data for.
 
 ## Language codes
 

@@ -92,7 +92,7 @@
       "expect": [
         "Calls analyze with --langs containing at least 30 language codes",
         "Handles a nonzero omitted count in the analyze response gracefully -- does not claim to have reported on every requested language if some were capped out of the response",
-        "Final answer correctly identifies and reports the top 3 fastest-growing languages from the (possibly capped) ranked list",
+        "Final answer correctly identifies and reports the top 3 fastest-growing languages -- from the ranked list if it has at least 3 entries after capping, or otherwise from the generated Markdown report (which always has the full, uncapped table), not fabricated or guessed",
         "Points to the Markdown report (or otherwise notes that the full per-language table is available there) rather than trying to enumerate every requested language in the chat reply itself",
         "Total cli.py calls stay low (2, or a small constant number) -- does not call analyze once per language"
       ]
