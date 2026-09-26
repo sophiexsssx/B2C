@@ -319,3 +319,94 @@ under `evals/transcripts/claude-code-haiku/*-after-fix.md`.
 - **Eval 8's cache-reuse verification**: still not observable from a
   tool-call transcript alone; would need cache-file timestamps or network
   logs to confirm, which is out of scope for a blind conversational eval.
+
+---
+
+## M6 iteration 2: notes expansion, default-language reversal, dedicated omission eval
+
+Fixed this round: cli.py gained three more `notes` categories (low-volume,
+not-significant, and -- most directly -- a CLI-generated `--article
+<lang>:"<correct title>"` retry for every `missing` language, closing the
+literal-syntax gap by construction rather than hoping the model phrases it
+right). SKILL.md reversed the `--langs` default-language guidance (never
+stop to ask; proceed with a stated default, offer to adjust) and reworded
+the `uk`/UK disambiguation. evals.json updated eval 3's expect list to
+match the reversed default behavior and added eval 9, a dedicated
+30+-language omission-relay stress test. Evals 1, 3, 6, 7, 8 reran; eval 9
+ran for the first time. Full transcripts: `evals/transcripts/claude-code-haiku/*-round2.md`
+and `large-language-list-omission-relay.md`.
+
+**Grading-rigor note**: this round's `eval-grader` instances were told to
+grade the omission-relay item *strictly* (explicit acknowledgment required,
+not just "avoided fabrication"), where the previous round's graders were
+told to credit it "in spirit." Eval 7's item 2 flipping from PASS to FAIL
+below reflects that stricter instruction on the *same* underlying model
+behavior (the omission note was never relayed, in either run) -- not a
+regression in the skill. Also: two of this round's `eval-grader` verdicts
+(eval 1, eval 7) initially graded FAIL on items that were actually present
+in the real model output but missing from an earlier draft of this round's
+own condensed transcript files -- corrected in the transcripts themselves,
+and reflected in the scores below rather than the raw grader output.
+
+### Before (iteration 1, after fix) -> after (iteration 2)
+
+| Eval | Iter. 1 (after fix) | Iter. 2 | What changed |
+|---|---|---|---|
+| 1. intermittent-fasting-pl-cs | 6/8 | **7/8** | Exactly 2 `cli.py` calls this time (no extra `resolve` check) -- the call-count gap closed on its own. `notes` now includes the exact `--article pl:"<correct title>"` retry, generated CLI-side. **Still open**: the final answer still never quotes that literal syntax, paraphrasing it as "check under another title" instead, even with the note handed to it ready-made and SKILL.md asking to relay it verbatim. |
+| 3. english-learning-cross-language-recommendation | 6/6 | **5/6** | The reversed default-language behavior works: turn 1 proceeded straight to a 12-language default instead of stopping to ask (the eval's whole new point). **New gap**: it never stated *why* it picked those 12 languages or offered to adjust -- SKILL.md asks for both, and only the "don't ask" half landed. Turn 2's recommendation remains solid (Romania/Poland/Vietnam, correctly confidence-calibrated). |
+| 6. short-period-under-24-months | 4/4 | **4/4** | Holding steady -- clean 2-call run, baseline-borrowing note relayed almost verbatim again. |
+| 7. many-languages-output-cap | 5/5 (lenient grading) | **3/5** (strict grading) | 34 languages, `omitted: 30`. Low-volume and not-significant notes relayed closely; missing-article notes relayed in substance (not literal syntax, same gap as eval 1). Top-3 (by smallest decline) correctly given. **Confirmed still-open, now under strict grading**: the omission note itself is never relayed to the user -- the model works around the cap by reading the full report instead, so no data is missing, but the user never learns the raw response was capped at all. Also over-enumerates many individual languages in the chat reply rather than deferring that detail to the report. |
+| 8. two-turn-follow-up-add-language-and-rerank | 3/4 (+1 inconclusive) | **3/4** (+1 inconclusive, unchanged) | No regression -- both turns still use the correct `uk`/`pl`/`de` codes and `--rank-by`. |
+| 9. large-language-list-omission-relay (**new**) | n/a | **4/5** | 32 languages, `omitted: 29`. Confirms eval 7's finding independently, on a different topic: the omission note is generated correctly but never relayed to the user. Gives a specific, data-grounded top recommendation (Portuguese, -2.7% YoY) without fabricating any number. |
+
+**Aggregate** (evals 1/3/6/7/8, excluding eval 8's perpetually-inconclusive
+item, and comparing like-for-like against iteration 1's *after-fix* scores
+under this round's stricter grading): 6+6+4+5+3 = 24/27 (iter. 1, as scored
+originally) vs. 7+5+4+3+3 = 22/27 (iter. 2). The apparent dip is entirely
+the eval 7 grading-strictness change above, not a real behavior regression
+-- the underlying omission-relay behavior was identical in both runs and is
+now correctly flagged as open in both.
+
+### New finding this round: confidence-level framing can drift from the raw data in a business-recommendation write-up
+
+Eval 9's top recommendation (Portuguese, "Coffee") is headlined "Confidence
+Level: Medium," but the raw `analyze`/`report` data for that exact result is
+`"confidence":"low"`, `significant: false`, with a `share_yoy_growth`
+sign-disagreement flag -- a real red flag on the underlying trend's
+strength. The same final answer correctly states "low confidence" for
+Portuguese elsewhere, in its detailed per-language table -- so the model
+had the right number, it just re-labeled the *recommendation itself* with a
+different, higher confidence level in the headline section, rationalized
+as "relative performance metrics are strong." This is a subtler version of
+"don't imply more certainty than significant: false supports" than the
+`expect` lists have tested for so far: not a wrong number, but a
+higher-confidence *framing* layered on top of a correctly-reported
+lower-confidence number, in the one section (the headline) most readers
+would actually act on. Not fixed this round -- flagged for a future
+iteration's SKILL.md wording (e.g., explicitly saying the recommendation's
+own stated confidence must never exceed the underlying result's
+`confidence` field).
+
+### What's still open after two fix rounds
+
+- **The literal `--article lang:"<correct title>"` retry syntax is never
+  relayed**, across three separate real runs now (eval 1's two iterations,
+  eval 7). The CLI now generates the exact text; SKILL.md now explicitly
+  asks for it to be relayed, "verbatim if useful"; the model still
+  paraphrases it away every time. This looks like a genuine model-behavior
+  tendency (prefer natural phrasing over quoting a code-like string) rather
+  than something a differently-worded instruction is likely to fix --
+  worth considering whether this actually matters to a human reader (a
+  natural "check under another title" may serve them fine) before spending
+  a third round chasing literal-string compliance.
+- **The omission note is never relayed**, across two separate large-language
+  runs on two different topics (eval 7, eval 9) -- both times the model
+  compensated well in substance (read the full report, never fabricated or
+  silently dropped data) but never told the user the raw tool response was
+  capped. Same open question as above: the *harm* this note exists to
+  prevent (answering from incomplete data) didn't happen either time, so
+  the practical stakes of the literal gap are worth weighing against
+  further SKILL.md tuning.
+- **Eval 3's "state why, offer to adjust" is new and unmet** -- one data
+  point; worth a third run before concluding this needs a stronger nudge in
+  SKILL.md than the current wording gives it.
